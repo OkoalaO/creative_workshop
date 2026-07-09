@@ -206,6 +206,12 @@
   font-size: 12px;
 }
 
+.empty-history {
+  margin: 10px 4px 0;
+  color: rgba(239, 252, 255, 0.45);
+  font-size: 13px;
+}
+
 .workspace {
   position: relative;
   z-index: 2;
@@ -322,10 +328,19 @@
   box-shadow: 0 0 18px rgba(21, 230, 201, 0.9);
 }
 
+.status-dot.is-muted {
+  background: rgba(239, 252, 255, 0.36);
+  box-shadow: none;
+}
+
 .preview-card {
   width: min(760px, 100%);
   padding: 16px;
   border-radius: 26px;
+}
+
+.preview-card.is-error {
+  border-color: rgba(255, 116, 116, 0.28);
 }
 
 .preview-header {
@@ -342,19 +357,48 @@
 }
 
 .preview-header span,
-.expiry-note {
+.expiry-note,
+.task-id {
   color: rgba(241, 251, 255, 0.56);
   font-size: 13px;
 }
 
-.preview-grid {
+.result-grid {
   display: grid;
   grid-template-columns: 1fr 0.8fr 0.8fr;
   gap: 10px;
-  min-height: 140px;
 }
 
-.preview-tile {
+.result-image {
+  min-width: 0;
+  margin: 0;
+}
+
+.result-image img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #101823;
+}
+
+.result-image figcaption {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.result-image a {
+  color: #8ef8ed;
+  text-decoration: none;
+}
+
+.task-state {
+  display: grid;
+  place-items: center;
+  gap: 14px;
+  min-height: 150px;
   border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background:
@@ -362,27 +406,39 @@
     #18202b;
 }
 
-.tile-one {
-  background:
-    radial-gradient(circle at 52% 35%, rgba(252, 255, 255, 0.65), transparent 11%),
-    radial-gradient(circle at 50% 56%, rgba(9, 222, 197, 0.58), transparent 32%),
-    #101823;
+.task-state p {
+  max-width: 560px;
+  margin: 0;
+  color: rgba(241, 251, 255, 0.72);
+  text-align: center;
 }
 
-.tile-two {
+.task-orb {
+  width: 52px;
+  height: 52px;
+  border-radius: 999px;
   background:
-    radial-gradient(circle at 66% 28%, rgba(255, 98, 127, 0.62), transparent 18%),
-    linear-gradient(145deg, #0c1321, #13434b);
+    radial-gradient(circle at 34% 24%, rgba(255, 255, 255, 0.9), transparent 13%),
+    radial-gradient(circle at 50% 50%, #09dcc5, #0d2b35 68%);
+  box-shadow: 0 0 34px rgba(9, 220, 197, 0.52);
+  animation: pulse 1.8s ease-in-out infinite;
 }
 
-.tile-three {
+.task-orb.is-error {
   background:
-    radial-gradient(circle at 46% 42%, rgba(144, 110, 255, 0.56), transparent 23%),
-    linear-gradient(145deg, #0a1119, #092927);
+    radial-gradient(circle at 36% 26%, rgba(255, 255, 255, 0.84), transparent 13%),
+    radial-gradient(circle at 50% 50%, #ff6767, #3a1218 70%);
+  box-shadow: 0 0 34px rgba(255, 103, 103, 0.42);
+  animation: none;
 }
 
 .expiry-note {
   margin: 12px 0 0;
+}
+
+.task-id {
+  margin: 12px 0 0;
+  word-break: break-all;
 }
 
 .composer {
@@ -448,6 +504,11 @@
   color: #071113;
   background: linear-gradient(135deg, #e9fffb, #16d8c3) !important;
   border: 0 !important;
+}
+
+.send-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .drawer-backdrop {
@@ -608,5 +669,18 @@ select:focus-visible {
     min-height: 36px;
     padding-inline: 11px;
     font-size: 13px;
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(0.96);
+    opacity: 0.72;
+  }
+
+  50% {
+    transform: scale(1);
+    opacity: 1;
   }
 }
