@@ -167,10 +167,27 @@
   margin-top: 26px;
 }
 
+.history-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
 .section-label {
-  margin: 0 0 10px;
+  margin: 0;
   color: rgba(239, 252, 255, 0.62);
   font-size: 13px;
+}
+
+.history-heading button {
+  border: 0;
+  color: rgba(239, 252, 255, 0.56);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
 }
 
 .history-list {
@@ -180,7 +197,9 @@
 
 .history-item {
   display: grid;
-  gap: 4px;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
   width: 100%;
   padding: 12px;
   text-align: left;
@@ -193,6 +212,31 @@
 .history-item:hover {
   background: rgba(255, 255, 255, 0.09);
   border-color: rgba(255, 255, 255, 0.13);
+}
+
+.history-thumb {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 40% 32%, rgba(255, 255, 255, 0.42), transparent 18%),
+    radial-gradient(circle at 50% 60%, rgba(2, 214, 191, 0.42), transparent 42%),
+    rgba(255, 255, 255, 0.08);
+}
+
+.history-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.history-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
 }
 
 .history-title {
@@ -394,6 +438,38 @@
   text-decoration: none;
 }
 
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.result-actions button,
+.result-actions a {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: rgba(243, 253, 255, 0.86);
+  background: rgba(255, 255, 255, 0.08);
+  font: inherit;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.result-actions button {
+  cursor: pointer;
+}
+
+.result-actions button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
 .task-state {
   display: grid;
   place-items: center;
@@ -576,6 +652,16 @@
   color: rgba(241, 251, 255, 0.74);
   font-size: 13px;
   font-weight: 700;
+}
+
+.key-state {
+  color: rgba(241, 251, 255, 0.52);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.key-state.is-connected {
+  color: #8ef8ed;
 }
 
 .settings-drawer input {

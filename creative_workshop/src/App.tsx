@@ -88,6 +88,7 @@ function App() {
   )
 
   const displayJob = activeJob ?? selectedHistory
+  const isConnected = Boolean(settings.apiKey.trim())
   const maskedKey = settings.apiKey
     ? `${settings.apiKey.slice(0, 4)}••••••••${settings.apiKey.slice(-4)}`
     : '未连接'
@@ -115,19 +116,33 @@ function App() {
     setSelectedId('')
   }
 
+  const clearHistory = () => {
+    saveHistory([])
+    setSelectedId('')
+    setActiveJob(null)
+  }
+
   const selectHistoryItem = (item: GenerationItem) => {
     setSelectedId(item.id)
     setActiveJob(null)
     setPrompt(item.prompt)
   }
 
-  const buildNodeInfoList = () => {
-    const template = settings.nodeTemplate.replaceAll('{{prompt}}', prompt.trim())
+  const retryJob = (item: GenerationItem) => {
+    setPrompt(item.prompt)
+    setActiveJob(null)
+    window.setTimeout(() => {
+      void runWorkflow(item.prompt)
+    }, 0)
+  }
+
+  const buildNodeInfoList = (inputPrompt: string) => {
+    const template = settings.nodeTemplate.replaceAll('{{prompt}}', inputPrompt.trim())
     return JSON.parse(template)
   }
 
-  const runWorkflow = async () => {
-    const cleanPrompt = prompt.trim()
+  const runWorkflow = async (promptOverride?: string) => {
+    const cleanPrompt = (promptOverride ?? prompt).trim()
 
     if (!settings.apiKey.trim()) {
       setSettingsOpen(true)
@@ -150,7 +165,7 @@ function App() {
 
     let nodeInfoList: unknown
     try {
-      nodeInfoList = buildNodeInfoList()
+      nodeInfoList = buildNodeInfoList(cleanPrompt)
     } catch {
       setActiveJob({
         id: crypto.randomUUID(),
@@ -291,7 +306,14 @@ function App() {
             </button>
 
             <section className="history-section">
-              <p className="section-label">历史创作</p>
+              <div className="history-heading">
+                <p className="section-label">历史创作</p>
+                {history.length > 0 && (
+                  <button type="button" onClick={clearHistory}>
+                    清空
+                  </button>
+                )}
+              </div>
               <div className="history-list">
                 {history.length ? (
                   history.map((item) => (
@@ -301,9 +323,14 @@ function App() {
                       key={item.id}
                       onClick={() => selectHistoryItem(item)}
                     >
-                      <span className="history-title">{item.title}</span>
-                      <span className="history-meta">
-                        {formatTime(item.createdAt)} · {formatStatus(item.status)}
+                      <span className="history-thumb">
+                        {getThumbnail(item) ? <img src={getThumbnail(item)} alt="" /> : <span />}
+                      </span>
+                      <span className="history-copy">
+                        <span className="history-title">{item.title}</span>
+                        <span className="history-meta">
+                          {formatTime(item.createdAt)} · {formatStatus(item.status)}
+                        </span>
                       </span>
                     </button>
                   ))
@@ -332,10 +359,10 @@ function App() {
 
           <div className="status-card">
             <div>
-              <span className={`status-dot ${settings.apiKey ? '' : 'is-muted'}`} />
-              当前连接：RunningHub · {maskedKey}
+              <span className={`status-dot ${isConnected ? '' : 'is-muted'}`} />
+              RunningHub · {isConnected ? '已连接' : '未连接'}
             </div>
-            <span>默认文生图工作流</span>
+            <span>{maskedKey}</span>
           </div>
 
           {displayJob && (
@@ -369,6 +396,16 @@ function App() {
               )}
 
               {displayJob.taskId && <p className="task-id">Task ID：{displayJob.taskId}</p>}
+              <div className="result-actions">
+                <button type="button" onClick={() => retryJob(displayJob)} disabled={isGenerating}>
+                  重新生成
+                </button>
+                {displayJob.resultUrls.map((url, index) => (
+                  <a href={url} download target="_blank" rel="noreferrer" key={url}>
+                    下载图片{displayJob.resultUrls.length > 1 ? index + 1 : ''}
+                  </a>
+                ))}
+              </div>
               <p className="expiry-note">RunningHub 返回的图片链接约 24 小时后可能失效，请及时下载。</p>
             </article>
           )}
@@ -398,7 +435,7 @@ function App() {
                 type="button"
                 aria-label="生成图片"
                 disabled={isGenerating}
-                onClick={runWorkflow}
+                onClick={() => runWorkflow()}
               >
                 {isGenerating ? '·' : '↑'}
               </button>
@@ -425,6 +462,9 @@ function App() {
 
         <label>
           API Key
+          <span className={`key-state ${isConnected ? 'is-connected' : ''}`}>
+            {isConnected ? '已连接，密钥只保存在当前浏览器' : '未连接'}
+          </span>
           <input
             type="password"
             value={settings.apiKey}
@@ -504,6 +544,10 @@ function getJobMessage(job: GenerationItem) {
   }
 
   return '准备开始生成。'
+}
+
+function getThumbnail(item: GenerationItem) {
+  return item.resultUrls[0]
 }
 
 export default App
