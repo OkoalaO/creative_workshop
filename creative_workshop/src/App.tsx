@@ -1,71 +1,65 @@
-import { useEffect, useMemo, useState } from 'react'
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  defaultRunningHubSettings,
+  extractResultUrls,
+  queryTask,
+  type RunningHubResponse,
+  type RunningHubSettings,
+  type RunningHubStatus,
+  submitImageToImageTask,
+  submitImageToVideoTask,
+  submitTextToImageTask,
+  uploadImage,
+} from './providers/runninghub'
 import './App.css'
 
-type RunningHubStatus = 'IDLE' | 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILED'
-
-type RunningHubResult = {
-  url?: string
-  nodeId?: string
-  outputType?: string
-  text?: string | null
-}
-
-type RunningHubResponse = {
-  taskId?: string
-  status?: RunningHubStatus
-  errorCode?: string
-  errorMessage?: string
-  results?: RunningHubResult[] | null
-}
+type GenerationMode = 'text-to-image' | 'image-to-image' | 'image-to-video'
+type ReferenceMode = Exclude<GenerationMode, 'text-to-image'>
+type GenerationStatus = RunningHubStatus | 'PENDING_RESULT'
 
 type GenerationItem = {
   id: string
   title: string
   prompt: string
-  status: RunningHubStatus
+  mode?: GenerationMode
+  status: GenerationStatus
   taskId?: string
   resultUrls: string[]
   errorMessage?: string
   createdAt: string
 }
 
-type Settings = {
-  apiKey: string
-  workflowId: string
-  instanceType: 'default' | 'plus'
-  nodeTemplate: string
+type ReferenceImage = {
+  name: string
+  url: string
+  file: File
 }
 
 const SETTINGS_KEY = 'cw-runninghub-settings'
 const HISTORY_KEY = 'cw-generation-history'
 const POLL_INTERVAL_MS = 2500
-const MAX_POLL_ATTEMPTS = 96
-
-const defaultSettings: Settings = {
-  apiKey: '',
-  workflowId: '1997246493079834625',
-  instanceType: 'default',
-  nodeTemplate:
-    '[\n  {\n    "nodeId": "6",\n    "fieldName": "text",\n    "fieldValue": "{{prompt}}"\n  }\n]',
-}
+const MAX_POLL_ATTEMPTS = Math.ceil((30 * 60 * 1000) / POLL_INTERVAL_MS)
 
 function App() {
   const [prompt, setPrompt] = useState('')
+  const [referenceImage, setReferenceImage] = useState<ReferenceImage | null>(null)
+  const [referenceMode, setReferenceMode] = useState<ReferenceMode>('image-to-image')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [selectedId, setSelectedId] = useState('')
-  const [settings, setSettings] = useState<Settings>(defaultSettings)
+  const [settings, setSettings] = useState<RunningHubSettings>(defaultRunningHubSettings)
   const [savedNotice, setSavedNotice] = useState('')
   const [history, setHistory] = useState<GenerationItem[]>([])
   const [activeJob, setActiveJob] = useState<GenerationItem | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
   const [toastMessage, setToastMessage] = useState('')
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     const savedSettings = window.localStorage.getItem(SETTINGS_KEY)
     if (savedSettings) {
       try {
-        setSettings({ ...defaultSettings, ...JSON.parse(savedSettings) })
+        setSettings({ ...defaultRunningHubSettings, ...JSON.parse(savedSettings) })
       } catch {
         window.localStorage.removeItem(SETTINGS_KEY)
       }
@@ -83,6 +77,14 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    return () => {
+      if (referenceImage) {
+        URL.revokeObjectURL(referenceImage.url)
+      }
+    }
+  }, [referenceImage])
+
   const selectedHistory = useMemo(
     () => history.find((item) => item.id === selectedId) ?? history[0] ?? null,
     [history, selectedId],
@@ -93,6 +95,7 @@ function App() {
   const maskedKey = settings.apiKey
     ? `${settings.apiKey.slice(0, 4)}••••••••${settings.apiKey.slice(-4)}`
     : '未连接'
+  const activeMode: GenerationMode = referenceImage ? referenceMode : 'text-to-image'
 
   const saveSettings = () => {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
@@ -112,6 +115,7 @@ function App() {
 
   const startNewChat = () => {
     setPrompt('')
+    clearReferenceImage()
     setActiveJob(null)
     setSelectedId('')
   }
@@ -126,11 +130,25 @@ function App() {
     setSelectedId(item.id)
     setActiveJob(null)
     setPrompt(item.prompt)
+
+    if (item.mode === 'image-to-image' || item.mode === 'image-to-video') {
+      setReferenceMode(item.mode)
+    }
   }
 
   const retryJob = (item: GenerationItem) => {
     setPrompt(item.prompt)
     setActiveJob(null)
+
+    if ((item.mode === 'image-to-image' || item.mode === 'image-to-video') && !referenceImage) {
+      showToast('重新生成需要先重新上传参考图')
+      return
+    }
+
+    if (item.mode === 'image-to-image' || item.mode === 'image-to-video') {
+      setReferenceMode(item.mode)
+    }
+
     window.setTimeout(() => {
       void runWorkflow(item.prompt)
     }, 0)
@@ -155,9 +173,87 @@ function App() {
     }
   }
 
-  const buildNodeInfoList = (inputPrompt: string) => {
-    const template = settings.nodeTemplate.replaceAll('{{prompt}}', inputPrompt.trim())
-    return JSON.parse(template)
+  const refreshJobResult = async (item: GenerationItem) => {
+    if (!settings.apiKey.trim()) {
+      setSettingsOpen(true)
+      showSavedNotice('请先填写 RunningHub API Key')
+      return
+    }
+
+    if (!item.taskId) {
+      showToast('这个任务没有保存 Task ID，无法刷新结果')
+      return
+    }
+
+    setIsGenerating(true)
+    setActiveJob({ ...item, errorMessage: undefined })
+
+    try {
+      const queryData = await queryTask(settings.apiKey.trim(), item.taskId)
+      const refreshedJob = mergeQueryResult(item, queryData)
+
+      setActiveJob(refreshedJob)
+      upsertHistory(refreshedJob)
+      showToast(refreshedJob.status === 'SUCCESS' ? '结果已刷新' : '任务仍在生成')
+    } catch (error) {
+      const failedJob: GenerationItem = {
+        ...item,
+        status: 'FAILED',
+        errorMessage: getErrorMessage(error),
+      }
+      setActiveJob(failedJob)
+      upsertHistory(failedJob)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const openReferencePicker = () => {
+    fileInputRef.current?.click()
+  }
+
+  const selectReferenceImage = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+
+    if (!file) {
+      return
+    }
+
+    if (!file.type.startsWith('image/')) {
+      showToast('请上传图片文件')
+      return
+    }
+
+    if (referenceImage) {
+      URL.revokeObjectURL(referenceImage.url)
+    }
+
+    setReferenceImage({
+      name: file.name,
+      url: URL.createObjectURL(file),
+      file,
+    })
+    showToast('参考图已添加，可选择图生图或图生视频')
+  }
+
+  const clearReferenceImage = () => {
+    setReferenceImage((currentImage) => {
+      if (currentImage) {
+        URL.revokeObjectURL(currentImage.url)
+      }
+
+      return null
+    })
+  }
+
+  const selectReferenceMode = (mode: ReferenceMode) => {
+    if (!referenceImage) {
+      showToast('先上传参考图，再选择图像工作流')
+      return
+    }
+
+    setReferenceMode(mode)
   }
 
   const runWorkflow = async (promptOverride?: string) => {
@@ -182,26 +278,14 @@ function App() {
       return
     }
 
-    let nodeInfoList: unknown
-    try {
-      nodeInfoList = buildNodeInfoList(cleanPrompt)
-    } catch {
-      setActiveJob({
-        id: crypto.randomUUID(),
-        title: '节点模板格式错误',
-        prompt: cleanPrompt,
-        status: 'FAILED',
-        resultUrls: [],
-        errorMessage: '内置节点模板不是有效 JSON，需要检查工作流参数映射。',
-        createdAt: new Date().toISOString(),
-      })
-      return
-    }
+    const imageInput = referenceImage
+    const mode = imageInput ? referenceMode : 'text-to-image'
 
     const job: GenerationItem = {
       id: crypto.randomUUID(),
       title: makeTitle(cleanPrompt),
       prompt: cleanPrompt,
+      mode,
       status: 'RUNNING',
       resultUrls: [],
       createdAt: new Date().toISOString(),
@@ -210,39 +294,36 @@ function App() {
     setIsGenerating(true)
     setActiveJob(job)
 
+    let trackedJob = job
+
     try {
-      const submitResponse = await fetch(
-        `https://www.runninghub.cn/openapi/v2/run/workflow/${settings.workflowId}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${settings.apiKey.trim()}`,
-          },
-          body: JSON.stringify({
-            addMetadata: true,
-            nodeInfoList,
-            instanceType: settings.instanceType,
-            usePersonalQueue: 'false',
-          }),
-        },
-      )
+      let submitData
 
-      const submitData = (await submitResponse.json()) as RunningHubResponse
-
-      if (!submitResponse.ok || submitData.errorCode || !submitData.taskId) {
-        throw new Error(submitData.errorMessage || `提交失败，HTTP ${submitResponse.status}`)
+      if (imageInput) {
+        showToast('正在上传参考图到 RunningHub')
+        const imageUrl = await uploadImage(settings.apiKey.trim(), imageInput.file)
+        submitData =
+          mode === 'image-to-video'
+            ? await submitImageToVideoTask(settings, cleanPrompt, imageUrl)
+            : await submitImageToImageTask(settings, cleanPrompt, imageUrl)
+      } else {
+        submitData = await submitTextToImageTask(settings, cleanPrompt)
       }
 
-      const runningJob = { ...job, taskId: submitData.taskId, status: submitData.status ?? 'RUNNING' }
-      setActiveJob(runningJob)
+      if (!submitData.taskId) {
+        throw new Error('提交成功，但 RunningHub 没有返回任务 ID。')
+      }
 
-      const completedJob = await pollRunningHubTask(runningJob, settings.apiKey.trim())
+      trackedJob = { ...job, taskId: submitData.taskId, status: submitData.status ?? 'RUNNING' }
+      setActiveJob(trackedJob)
+      upsertHistory(trackedJob)
+
+      const completedJob = await pollRunningHubTask(trackedJob, settings.apiKey.trim())
       setActiveJob(completedJob)
       upsertHistory(completedJob)
     } catch (error) {
       const failedJob: GenerationItem = {
-        ...job,
+        ...trackedJob,
         status: 'FAILED',
         errorMessage: getErrorMessage(error),
       }
@@ -257,34 +338,19 @@ function App() {
     for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt += 1) {
       await wait(POLL_INTERVAL_MS)
 
-      const queryResponse = await fetch('https://www.runninghub.cn/openapi/v2/query', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({ taskId: job.taskId }),
-      })
-
-      const queryData = (await queryResponse.json()) as RunningHubResponse
-
-      if (!queryResponse.ok || queryData.errorCode) {
-        throw new Error(queryData.errorMessage || `查询失败，HTTP ${queryResponse.status}`)
-      }
+      const queryData = await queryTask(apiKey, job.taskId)
 
       const nextStatus = queryData.status ?? 'RUNNING'
       const nextJob = { ...job, status: nextStatus }
       setActiveJob(nextJob)
 
       if (nextStatus === 'SUCCESS') {
-        const resultUrls = (queryData.results ?? [])
-          .map((result) => result.url)
-          .filter((url): url is string => Boolean(url))
+        const resultUrls = extractResultUrls(queryData.results)
 
         return {
           ...nextJob,
           resultUrls,
-          errorMessage: resultUrls.length ? undefined : '任务成功，但没有返回图片链接。',
+          errorMessage: resultUrls.length ? undefined : '任务成功，但没有返回结果链接。',
         }
       }
 
@@ -293,7 +359,11 @@ function App() {
       }
     }
 
-    throw new Error('等待时间过长，任务仍未完成。可以稍后在 RunningHub 查看任务结果。')
+    return {
+      ...job,
+      status: 'PENDING_RESULT',
+      errorMessage: '仍在生成，可稍后刷新结果。RunningHub 任务会继续运行。',
+    }
   }
 
   return (
@@ -395,13 +465,17 @@ function App() {
               </div>
 
               {displayJob.status === 'SUCCESS' && displayJob.resultUrls.length > 0 ? (
-                <div className="result-grid">
+                <div className={`result-grid ${displayJob.mode === 'image-to-video' ? 'has-video' : ''}`}>
                   {displayJob.resultUrls.map((url) => (
                     <figure className="result-image" key={url}>
-                      <img src={url} alt={displayJob.prompt} />
+                      {isVideoResult(url, displayJob.mode) ? (
+                        <video src={url} controls playsInline />
+                      ) : (
+                        <img src={url} alt={displayJob.prompt} />
+                      )}
                       <figcaption>
                         <a href={url} target="_blank" rel="noreferrer">
-                          打开图片
+                          {isVideoResult(url, displayJob.mode) ? '打开视频' : '打开图片'}
                         </a>
                       </figcaption>
                     </figure>
@@ -419,28 +493,48 @@ function App() {
                 <button type="button" onClick={() => retryJob(displayJob)} disabled={isGenerating}>
                   重新生成
                 </button>
+                {displayJob.taskId && (
+                  <button type="button" onClick={() => refreshJobResult(displayJob)} disabled={isGenerating}>
+                    刷新结果
+                  </button>
+                )}
                 {displayJob.resultUrls.map((url, index) => (
                   <span className="image-actions" key={url}>
                     <button type="button" onClick={() => copyImageLink(url)}>
                       复制链接{displayJob.resultUrls.length > 1 ? index + 1 : ''}
                     </button>
                     <a href={url} download target="_blank" rel="noreferrer">
-                      下载图片{displayJob.resultUrls.length > 1 ? index + 1 : ''}
+                      下载{isVideoResult(url, displayJob.mode) ? '视频' : '图片'}
+                      {displayJob.resultUrls.length > 1 ? index + 1 : ''}
                     </a>
                   </span>
                 ))}
               </div>
-              <p className="expiry-note">RunningHub 返回的图片链接约 24 小时后可能失效，请及时下载。</p>
+              <p className="expiry-note">RunningHub 返回的结果链接约 24 小时后可能失效，请及时下载。</p>
             </article>
           )}
         </section>
 
         <section className="composer" aria-label="创作输入框">
+          {referenceImage && (
+            <div className="reference-preview">
+              <img src={referenceImage.url} alt="" />
+              <button type="button" onClick={clearReferenceImage} aria-label="移除参考图">
+                ×
+              </button>
+            </div>
+          )}
           <textarea
             value={prompt}
             maxLength={2000}
             onChange={(event) => setPrompt(event.target.value)}
-            placeholder="描述你的想法，或上传参考图。比如：生成一张国风少女海报，红色斗篷，雪景，电影感..."
+            placeholder={
+              activeMode === 'image-to-video'
+                ? '描述你想让图片如何动起来。比如：镜头缓慢推进，头发和衣摆随风轻轻摆动，电影感...'
+                : referenceImage
+                ? '描述你想如何修改这张图。比如：保留人物姿势，改成赛博朋克灯光，增强电影感...'
+                : '描述你的想法，或上传参考图。比如：生成一张国风少女海报，红色斗篷，雪景，电影感...'
+            }
           />
           <div className="composer-footer">
             <div className="composer-tools">
@@ -448,11 +542,32 @@ function App() {
                 className="round-tool"
                 type="button"
                 aria-label="上传参考图"
-                onClick={() => showToast('图生图功能即将支持，当前先使用文生图')}
+                onClick={openReferencePicker}
               >
                 ＋
               </button>
-              <button type="button">文生图</button>
+              {referenceImage ? (
+                <span className="mode-switch" aria-label="选择参考图工作流">
+                  <button
+                    className={referenceMode === 'image-to-image' ? 'is-active' : ''}
+                    type="button"
+                    aria-pressed={referenceMode === 'image-to-image'}
+                    onClick={() => selectReferenceMode('image-to-image')}
+                  >
+                    图生图
+                  </button>
+                  <button
+                    className={referenceMode === 'image-to-video' ? 'is-active' : ''}
+                    type="button"
+                    aria-pressed={referenceMode === 'image-to-video'}
+                    onClick={() => selectReferenceMode('image-to-video')}
+                  >
+                    图生视频
+                  </button>
+                </span>
+              ) : (
+                <button type="button">文生图</button>
+              )}
               <button type="button">RunningHub</button>
               <button type="button">比例 自动</button>
               <button type="button">中文</button>
@@ -462,7 +577,7 @@ function App() {
               <button
                 className="send-button"
                 type="button"
-                aria-label="生成图片"
+                aria-label="生成内容"
                 disabled={isGenerating}
                 onClick={() => runWorkflow()}
               >
@@ -508,6 +623,7 @@ function App() {
         {savedNotice && <p className="saved-notice">{savedNotice}</p>}
       </aside>
 
+      <input ref={fileInputRef} className="file-input" type="file" accept="image/*" onChange={selectReferenceImage} />
       {toastMessage && <div className="toast-message">{toastMessage}</div>}
     </main>
   )
@@ -535,13 +651,43 @@ function getErrorMessage(error: unknown) {
   return '生成失败，请稍后重试。'
 }
 
-function formatStatus(status: RunningHubStatus) {
-  const statusMap: Record<RunningHubStatus, string> = {
+function mergeQueryResult(job: GenerationItem, queryData: RunningHubResponse): GenerationItem {
+  const nextStatus = queryData.status ?? 'RUNNING'
+
+  if (nextStatus === 'SUCCESS') {
+    const resultUrls = extractResultUrls(queryData.results)
+
+    return {
+      ...job,
+      status: 'SUCCESS',
+      resultUrls,
+      errorMessage: resultUrls.length ? undefined : '任务成功，但没有返回结果链接。',
+    }
+  }
+
+  if (nextStatus === 'FAILED') {
+    return {
+      ...job,
+      status: 'FAILED',
+      errorMessage: queryData.errorMessage || 'RunningHub 任务生成失败。',
+    }
+  }
+
+  return {
+    ...job,
+    status: 'PENDING_RESULT',
+    errorMessage: 'RunningHub 仍在生成，可以稍后再次刷新结果。',
+  }
+}
+
+function formatStatus(status: GenerationStatus) {
+  const statusMap: Record<GenerationStatus, string> = {
     IDLE: '待开始',
     QUEUED: '排队中',
     RUNNING: '生成中',
     SUCCESS: '完成',
     FAILED: '失败',
+    PENDING_RESULT: '等待结果',
   }
 
   return statusMap[status]
@@ -571,7 +717,11 @@ function getJobMessage(job: GenerationItem) {
   }
 
   if (job.status === 'RUNNING') {
-    return 'RunningHub 正在生成图片，请稍等。'
+    return job.mode === 'image-to-video' ? 'RunningHub 正在生成视频，请稍等。' : 'RunningHub 正在生成图片，请稍等。'
+  }
+
+  if (job.status === 'PENDING_RESULT') {
+    return '仍在生成，可稍后点击刷新结果。'
   }
 
   return '准备开始生成。'
@@ -579,6 +729,10 @@ function getJobMessage(job: GenerationItem) {
 
 function getThumbnail(item: GenerationItem) {
   return item.resultUrls[0]
+}
+
+function isVideoResult(url: string, mode?: GenerationMode) {
+  return mode === 'image-to-video' || /\.(mp4|webm|mov)(\?|#|$)/i.test(url)
 }
 
 export default App
