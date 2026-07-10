@@ -59,6 +59,7 @@ function App() {
   const [history, setHistory] = useState<GenerationItem[]>([])
   const [activeJob, setActiveJob] = useState<GenerationItem | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [toastMessage, setToastMessage] = useState('')
 
   useEffect(() => {
     const savedSettings = window.localStorage.getItem(SETTINGS_KEY)
@@ -95,8 +96,7 @@ function App() {
 
   const saveSettings = () => {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
-    setSavedNotice('设置已保存到当前浏览器')
-    window.setTimeout(() => setSavedNotice(''), 2400)
+    showSavedNotice('设置已保存到当前浏览器')
   }
 
   const saveHistory = (nextHistory: GenerationItem[]) => {
@@ -136,6 +136,25 @@ function App() {
     }, 0)
   }
 
+  const showSavedNotice = (message: string) => {
+    setSavedNotice(message)
+    window.setTimeout(() => setSavedNotice(''), 2400)
+  }
+
+  const showToast = (message: string) => {
+    setToastMessage(message)
+    window.setTimeout(() => setToastMessage(''), 2400)
+  }
+
+  const copyImageLink = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url)
+      showToast('图片链接已复制')
+    } catch {
+      showToast('复制失败，请打开图片后手动复制')
+    }
+  }
+
   const buildNodeInfoList = (inputPrompt: string) => {
     const template = settings.nodeTemplate.replaceAll('{{prompt}}', inputPrompt.trim())
     return JSON.parse(template)
@@ -146,7 +165,7 @@ function App() {
 
     if (!settings.apiKey.trim()) {
       setSettingsOpen(true)
-      setSavedNotice('请先填写 RunningHub API Key')
+      showSavedNotice('请先填写 RunningHub API Key')
       return
     }
 
@@ -401,9 +420,14 @@ function App() {
                   重新生成
                 </button>
                 {displayJob.resultUrls.map((url, index) => (
-                  <a href={url} download target="_blank" rel="noreferrer" key={url}>
-                    下载图片{displayJob.resultUrls.length > 1 ? index + 1 : ''}
-                  </a>
+                  <span className="image-actions" key={url}>
+                    <button type="button" onClick={() => copyImageLink(url)}>
+                      复制链接{displayJob.resultUrls.length > 1 ? index + 1 : ''}
+                    </button>
+                    <a href={url} download target="_blank" rel="noreferrer">
+                      下载图片{displayJob.resultUrls.length > 1 ? index + 1 : ''}
+                    </a>
+                  </span>
                 ))}
               </div>
               <p className="expiry-note">RunningHub 返回的图片链接约 24 小时后可能失效，请及时下载。</p>
@@ -420,7 +444,12 @@ function App() {
           />
           <div className="composer-footer">
             <div className="composer-tools">
-              <button className="round-tool" type="button" aria-label="上传参考图">
+              <button
+                className="round-tool"
+                type="button"
+                aria-label="上传参考图"
+                onClick={() => showToast('图生图功能即将支持，当前先使用文生图')}
+              >
                 ＋
               </button>
               <button type="button">文生图</button>
@@ -437,7 +466,7 @@ function App() {
                 disabled={isGenerating}
                 onClick={() => runWorkflow()}
               >
-                {isGenerating ? '·' : '↑'}
+                {isGenerating ? '生成中' : '↑'}
               </button>
             </div>
           </div>
@@ -478,6 +507,8 @@ function App() {
         </button>
         {savedNotice && <p className="saved-notice">{savedNotice}</p>}
       </aside>
+
+      {toastMessage && <div className="toast-message">{toastMessage}</div>}
     </main>
   )
 }
