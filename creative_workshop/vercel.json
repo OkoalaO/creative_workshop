@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/newapi/v1beta/models/:model",
+      "destination": "http://38.145.218.40:12001/v1beta/models/:model"
+    },
+    {
+      "source": "/api/newapi/v1/images/generations",
+      "destination": "http://38.145.218.40:12001/v1/images/generations"
+    },
+    {
+      "source": "/api/newapi/interactions",
+      "destination": "http://38.145.218.40:12001/interactions"
+    }
+  ]
+}

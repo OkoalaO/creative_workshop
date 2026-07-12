@@ -330,28 +330,12 @@ async function requestJson<T extends ApiError>(url: string, init: RequestInit, p
 async function fetchWithProductionProxy(url: string, init: RequestInit) {
   if (!shouldUseProductionProxy(url)) return fetch(url, init)
 
-  if (init.method !== 'POST' || typeof init.body !== 'string') {
-    throw new Error('代理仅支持 JSON 格式的 POST 请求。')
+  const target = new URL(url)
+  if (target.host !== '38.145.218.40:12001') {
+    throw new Error('该 HTTP API 地址暂未获得平台支持。')
   }
 
-  const headers = new Headers(init.headers)
-  let payload: unknown
-  try {
-    payload = JSON.parse(init.body)
-  } catch {
-    throw new Error('代理请求内容不是有效的 JSON。')
-  }
-
-  return fetch('/api/image-proxy', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      targetUrl: url,
-      authorization: headers.get('Authorization') || undefined,
-      googleApiKey: headers.get('x-goog-api-key') || undefined,
-      payload,
-    }),
-  })
+  return fetch(`/api/newapi${target.pathname}${target.search}`, init)
 }
 
 export function shouldUseProductionProxy(url: string) {
