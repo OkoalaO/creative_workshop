@@ -57,6 +57,7 @@ type RunWorkflowPayload = {
 }
 
 const RUNNINGHUB_BASE_URL = 'https://www.runninghub.ai'
+const RUNNINGHUB_PROXY_PREFIX = '/api/runninghub'
 const IMAGE_TO_IMAGE_WORKFLOW_ID = '2004148282525949953'
 const IMAGE_TO_VIDEO_WORKFLOW_ID = '2073634201202679809'
 const IMAGE_TO_IMAGE_NODE_TEMPLATE =
@@ -114,7 +115,7 @@ export function buildImageToVideoPayload(
 }
 
 export async function submitTextToImageTask(settings: RunningHubSettings, prompt: string) {
-  const response = await fetch(`${RUNNINGHUB_BASE_URL}/task/openapi/create`, {
+  const response = await fetch(buildRunningHubUrl('/task/openapi/create'), {
     method: 'POST',
     headers: buildHeaders(settings.apiKey),
     body: JSON.stringify(buildTextToImagePayload(settings, prompt)),
@@ -129,7 +130,7 @@ export async function uploadImage(apiKey: string, file: File) {
   formData.append('file', file)
   formData.append('fileType', 'input')
 
-  const response = await fetch(`${RUNNINGHUB_BASE_URL}/task/openapi/upload`, {
+  const response = await fetch(buildRunningHubUrl('/task/openapi/upload'), {
     method: 'POST',
     headers: buildAuthHeaders(apiKey),
     body: formData,
@@ -149,7 +150,7 @@ export async function uploadImage(apiKey: string, file: File) {
 }
 
 export async function submitImageToImageTask(settings: RunningHubSettings, prompt: string, imageUrl: string) {
-  const response = await fetch(`${RUNNINGHUB_BASE_URL}/task/openapi/create`, {
+  const response = await fetch(buildRunningHubUrl('/task/openapi/create'), {
     method: 'POST',
     headers: buildHeaders(settings.apiKey),
     body: JSON.stringify(buildImageToImagePayload(settings, prompt, imageUrl)),
@@ -159,7 +160,7 @@ export async function submitImageToImageTask(settings: RunningHubSettings, promp
 }
 
 export async function submitImageToVideoTask(settings: RunningHubSettings, prompt: string, imageUrl: string) {
-  const response = await fetch(`${RUNNINGHUB_BASE_URL}/task/openapi/create`, {
+  const response = await fetch(buildRunningHubUrl('/task/openapi/create'), {
     method: 'POST',
     headers: buildHeaders(settings.apiKey),
     body: JSON.stringify(buildImageToVideoPayload(settings, prompt, imageUrl)),
@@ -173,7 +174,7 @@ export async function queryTask(apiKey: string, taskId: string | undefined): Pro
     throw new Error('缺少 RunningHub 任务 ID，无法查询结果。')
   }
 
-  const statusResponse = await fetch(`${RUNNINGHUB_BASE_URL}/task/openapi/status`, {
+  const statusResponse = await fetch(buildRunningHubUrl('/task/openapi/status'), {
     method: 'POST',
     headers: buildHeaders(apiKey),
     body: JSON.stringify({ apiKey: apiKey.trim(), taskId }),
@@ -185,7 +186,7 @@ export async function queryTask(apiKey: string, taskId: string | undefined): Pro
     return { ...statusData, taskId, status }
   }
 
-  const outputsResponse = await fetch(`${RUNNINGHUB_BASE_URL}/task/openapi/outputs`, {
+  const outputsResponse = await fetch(buildRunningHubUrl('/task/openapi/outputs'), {
     method: 'POST',
     headers: buildHeaders(apiKey),
     body: JSON.stringify({ apiKey: apiKey.trim(), taskId }),
@@ -207,6 +208,14 @@ function buildNodeInfoList(nodeTemplate: string, values: Record<string, string>)
   } catch {
     throw new Error('内置节点模板不是有效 JSON，需要检查工作流参数映射。')
   }
+}
+
+export function buildRunningHubUrl(path: string) {
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    return `${RUNNINGHUB_PROXY_PREFIX}${path}`
+  }
+
+  return `${RUNNINGHUB_BASE_URL}${path}`
 }
 
 function buildHeaders(apiKey: string) {
