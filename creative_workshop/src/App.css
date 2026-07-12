@@ -102,18 +102,6 @@
   gap: 10px;
 }
 
-.brand-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 16px;
-  color: #041012;
-  font-weight: 800;
-  background: linear-gradient(135deg, #bdfcf3, #08ceb8);
-}
-
 .icon-button,
 .settings-button,
 .new-chat,
@@ -324,7 +312,6 @@
   border: 1px solid rgba(255, 255, 255, 0.14);
 }
 
-.status-card,
 .preview-card,
 .composer {
   border: 1px solid rgba(255, 255, 255, 0.16);
@@ -337,44 +324,11 @@
   backdrop-filter: blur(28px);
 }
 
-.status-card {
-  display: flex;
-  justify-content: space-between;
-  gap: 18px;
-  width: min(760px, 100%);
-  padding: 13px 16px;
-  border-radius: 18px;
-  color: rgba(241, 251, 255, 0.72);
-  font-size: 13px;
-}
-
-.status-card div {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-}
-
-.status-card span,
 .history-title,
 .history-meta {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.status-dot {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #15e6c9;
-  box-shadow: 0 0 18px rgba(21, 230, 201, 0.9);
-}
-
-.status-dot.is-muted {
-  background: rgba(239, 252, 255, 0.36);
-  box-shadow: none;
 }
 
 .preview-card {
@@ -613,6 +567,38 @@
   color: rgba(243, 253, 255, 0.84);
 }
 
+.provider-picker {
+  display: inline-flex;
+}
+
+.provider-picker select {
+  min-height: 40px;
+  padding: 0 34px 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 999px;
+  color: rgba(243, 253, 255, 0.84);
+  background: rgba(255, 255, 255, 0.08);
+  font: inherit;
+  cursor: pointer;
+}
+
+.provider-picker option {
+  color: #f7fbff;
+  background: #101820;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .mode-switch {
   display: inline-flex;
   gap: 4px;
@@ -721,6 +707,42 @@
   letter-spacing: 0;
 }
 
+.provider-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 22px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.provider-tabs button {
+  min-height: 40px;
+  border: 0;
+  border-radius: 11px;
+  color: rgba(241, 251, 255, 0.62);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.provider-tabs button.is-active {
+  color: #061011;
+  background: #8ef8ed;
+}
+
+.provider-scope,
+.key-guidance {
+  margin: -4px 0 18px;
+  color: rgba(241, 251, 255, 0.52);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .settings-drawer label {
   display: grid;
   gap: 8px;
@@ -740,7 +762,8 @@
   color: #8ef8ed;
 }
 
-.settings-drawer input {
+.settings-drawer input,
+.settings-drawer select {
   width: 100%;
   box-sizing: border-box;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -749,6 +772,42 @@
   background: rgba(255, 255, 255, 0.07);
   font: inherit;
   outline: none;
+}
+
+.settings-drawer select {
+  min-height: 46px;
+  padding: 0 38px 0 13px;
+  cursor: pointer;
+}
+
+.settings-drawer select option {
+  color: #f7fbff;
+  background: #101820;
+}
+
+.settings-drawer .remember-key {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 8px;
+  cursor: pointer;
+}
+
+.settings-drawer .remember-key input {
+  flex: 0 0 auto;
+  width: 18px;
+  min-height: 18px;
+  margin: 0;
+  accent-color: #28ddc9;
+}
+
+.settings-drawer .remember-key span {
+  color: rgba(241, 251, 255, 0.72);
+}
+
+.key-guidance {
+  margin-top: 0;
 }
 
 .settings-drawer input {
@@ -821,8 +880,7 @@ select:focus-visible {
     margin-top: 56px;
   }
 
-  .preview-card,
-  .status-card {
+  .preview-card {
     display: none;
   }
 

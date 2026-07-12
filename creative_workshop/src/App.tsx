@@ -1,16 +1,18 @@
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
   defaultRunningHubSettings,
-  extractResultUrls,
-  queryTask,
-  type RunningHubResponse,
   type RunningHubSettings,
   type RunningHubStatus,
-  submitImageToImageTask,
-  submitImageToVideoTask,
-  submitTextToImageTask,
-  uploadImage,
 } from './providers/runninghub'
+import {
+  defaultGeminiSettings,
+  geminiAdapter,
+  getGeminiProtocolDescription,
+  type GeminiSettings,
+  type ProviderId,
+  type ProviderTask,
+  runningHubAdapter,
+} from './providers'
 import './App.css'
 
 type GenerationMode = 'text-to-image' | 'image-to-image' | 'image-to-video'
@@ -21,6 +23,7 @@ type GenerationItem = {
   id: string
   title: string
   prompt: string
+  providerId?: ProviderId
   mode?: GenerationMode
   status: GenerationStatus
   taskId?: string
@@ -35,7 +38,11 @@ type ReferenceImage = {
   file: File
 }
 
-const SETTINGS_KEY = 'cw-runninghub-settings'
+const RUNNINGHUB_SETTINGS_KEY = 'cw-runninghub-settings'
+const GEMINI_SETTINGS_KEY = 'cw-gemini-settings'
+const GEMINI_SESSION_KEY = 'cw-gemini-session-key'
+const GEMINI_REMEMBERED_KEY = 'cw-gemini-remembered-key'
+const ACTIVE_PROVIDER_KEY = 'cw-active-provider'
 const HISTORY_KEY = 'cw-generation-history'
 const POLL_INTERVAL_MS = 2500
 const MAX_POLL_ATTEMPTS = Math.ceil((30 * 60 * 1000) / POLL_INTERVAL_MS)
@@ -47,7 +54,10 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [selectedId, setSelectedId] = useState('')
-  const [settings, setSettings] = useState<RunningHubSettings>(defaultRunningHubSettings)
+  const [activeProvider, setActiveProvider] = useState<ProviderId>('runninghub')
+  const [settingsProvider, setSettingsProvider] = useState<ProviderId>('runninghub')
+  const [runningHubSettings, setRunningHubSettings] = useState<RunningHubSettings>(defaultRunningHubSettings)
+  const [geminiSettings, setGeminiSettings] = useState<GeminiSettings>(defaultGeminiSettings)
   const [savedNotice, setSavedNotice] = useState('')
   const [history, setHistory] = useState<GenerationItem[]>([])
   const [activeJob, setActiveJob] = useState<GenerationItem | null>(null)
@@ -56,13 +66,26 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
-    const savedSettings = window.localStorage.getItem(SETTINGS_KEY)
-    if (savedSettings) {
+    const savedRunningHubSettings = window.localStorage.getItem(RUNNINGHUB_SETTINGS_KEY)
+    if (savedRunningHubSettings) {
       try {
-        setSettings({ ...defaultRunningHubSettings, ...JSON.parse(savedSettings) })
+        setRunningHubSettings({ ...defaultRunningHubSettings, ...JSON.parse(savedRunningHubSettings) })
       } catch {
-        window.localStorage.removeItem(SETTINGS_KEY)
+        window.localStorage.removeItem(RUNNINGHUB_SETTINGS_KEY)
       }
+    }
+
+    const savedGeminiSettings = readStoredObject<Partial<GeminiSettings>>(GEMINI_SETTINGS_KEY)
+    const rememberApiKey = savedGeminiSettings?.rememberApiKey ?? false
+    const apiKey = rememberApiKey
+      ? window.localStorage.getItem(GEMINI_REMEMBERED_KEY) ?? ''
+      : window.sessionStorage.getItem(GEMINI_SESSION_KEY) ?? ''
+    setGeminiSettings({ ...defaultGeminiSettings, ...savedGeminiSettings, apiKey, rememberApiKey })
+
+    const savedProvider = window.localStorage.getItem(ACTIVE_PROVIDER_KEY)
+    if (savedProvider === 'runninghub' || savedProvider === 'gemini') {
+      setActiveProvider(savedProvider)
+      setSettingsProvider(savedProvider)
     }
 
     const savedHistory = window.localStorage.getItem(HISTORY_KEY)
@@ -91,20 +114,37 @@ function App() {
   )
 
   const displayJob = activeJob ?? selectedHistory
-  const isConnected = Boolean(settings.apiKey.trim())
-  const maskedKey = settings.apiKey
-    ? `${settings.apiKey.slice(0, 4)}••••••••${settings.apiKey.slice(-4)}`
-    : '未连接'
   const activeMode: GenerationMode = referenceImage ? referenceMode : 'text-to-image'
 
   const saveSettings = () => {
-    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
-    showSavedNotice('设置已保存到当前浏览器')
+    if (settingsProvider === 'runninghub') {
+      window.localStorage.setItem(RUNNINGHUB_SETTINGS_KEY, JSON.stringify(runningHubSettings))
+    } else {
+      const { apiKey: _apiKey, ...publicSettings } = geminiSettings
+      window.localStorage.setItem(GEMINI_SETTINGS_KEY, JSON.stringify(publicSettings))
+
+      if (!geminiSettings.apiKey.trim()) {
+        window.sessionStorage.removeItem(GEMINI_SESSION_KEY)
+        window.localStorage.removeItem(GEMINI_REMEMBERED_KEY)
+      } else if (geminiSettings.rememberApiKey) {
+        window.localStorage.setItem(GEMINI_REMEMBERED_KEY, geminiSettings.apiKey)
+        window.sessionStorage.removeItem(GEMINI_SESSION_KEY)
+      } else {
+        window.sessionStorage.setItem(GEMINI_SESSION_KEY, geminiSettings.apiKey)
+        window.localStorage.removeItem(GEMINI_REMEMBERED_KEY)
+      }
+    }
+
+    showSavedNotice(geminiSettings.rememberApiKey && settingsProvider === 'gemini' ? '设置已保存到此设备' : '设置已保存')
   }
 
   const saveHistory = (nextHistory: GenerationItem[]) => {
     setHistory(nextHistory)
-    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(nextHistory))
+    try {
+      window.localStorage.setItem(HISTORY_KEY, JSON.stringify(sanitizeHistoryForStorage(nextHistory)))
+    } catch {
+      showToast('历史记录空间不足，本次结果仅在当前页面保留')
+    }
   }
 
   const upsertHistory = (item: GenerationItem) => {
@@ -131,6 +171,10 @@ function App() {
     setActiveJob(null)
     setPrompt(item.prompt)
 
+    if (item.providerId) {
+      selectProvider(item.providerId)
+    }
+
     if (item.mode === 'image-to-image' || item.mode === 'image-to-video') {
       setReferenceMode(item.mode)
     }
@@ -139,6 +183,10 @@ function App() {
   const retryJob = (item: GenerationItem) => {
     setPrompt(item.prompt)
     setActiveJob(null)
+
+    if (item.providerId) {
+      selectProvider(item.providerId)
+    }
 
     if ((item.mode === 'image-to-image' || item.mode === 'image-to-video') && !referenceImage) {
       showToast('重新生成需要先重新上传参考图')
@@ -150,7 +198,7 @@ function App() {
     }
 
     window.setTimeout(() => {
-      void runWorkflow(item.prompt)
+      void runWorkflow(item.prompt, item.providerId ?? 'runninghub')
     }, 0)
   }
 
@@ -164,6 +212,17 @@ function App() {
     window.setTimeout(() => setToastMessage(''), 2400)
   }
 
+  const selectProvider = (providerId: ProviderId) => {
+    setActiveProvider(providerId)
+    setSettingsProvider(providerId)
+    window.localStorage.setItem(ACTIVE_PROVIDER_KEY, providerId)
+
+    if (providerId === 'gemini' && referenceMode === 'image-to-video') {
+      setReferenceMode('image-to-image')
+      showToast('NanoBanana 暂不支持图生视频，已切换为图生图')
+    }
+  }
+
   const copyImageLink = async (url: string) => {
     try {
       await navigator.clipboard.writeText(url)
@@ -174,7 +233,12 @@ function App() {
   }
 
   const refreshJobResult = async (item: GenerationItem) => {
-    if (!settings.apiKey.trim()) {
+    if ((item.providerId ?? 'runninghub') !== 'runninghub') {
+      showToast('NanoBanana 请求会同步返回，不需要刷新任务')
+      return
+    }
+
+    if (!runningHubSettings.apiKey.trim()) {
       setSettingsOpen(true)
       showSavedNotice('请先填写 RunningHub API Key')
       return
@@ -189,8 +253,9 @@ function App() {
     setActiveJob({ ...item, errorMessage: undefined })
 
     try {
-      const queryData = await queryTask(settings.apiKey.trim(), item.taskId)
-      const refreshedJob = mergeQueryResult(item, queryData)
+      const queryData = await runningHubAdapter.queryTask?.(runningHubSettings, item.taskId)
+      if (!queryData) throw new Error('RunningHub 未提供任务查询能力。')
+      const refreshedJob = mergeProviderTask(item, queryData)
 
       setActiveJob(refreshedJob)
       upsertHistory(refreshedJob)
@@ -253,15 +318,27 @@ function App() {
       return
     }
 
+    if (activeProvider === 'gemini' && mode === 'image-to-video') {
+      showToast('NanoBanana 当前不支持图生视频')
+      return
+    }
+
     setReferenceMode(mode)
   }
 
-  const runWorkflow = async (promptOverride?: string) => {
+  const runWorkflow = async (promptOverride?: string, providerOverride?: ProviderId) => {
     const cleanPrompt = (promptOverride ?? prompt).trim()
+    const providerId = providerOverride ?? activeProvider
 
-    if (!settings.apiKey.trim()) {
+    const configured =
+      providerId === 'gemini'
+        ? geminiAdapter.isConfigured(geminiSettings)
+        : runningHubAdapter.isConfigured(runningHubSettings)
+
+    if (!configured) {
+      setSettingsProvider(providerId)
       setSettingsOpen(true)
-      showSavedNotice('请先填写 RunningHub API Key')
+      showSavedNotice(providerId === 'gemini' ? '请补全 NanoBanana 连接设置' : '请先填写 RunningHub API Key')
       return
     }
 
@@ -281,10 +358,16 @@ function App() {
     const imageInput = referenceImage
     const mode = imageInput ? referenceMode : 'text-to-image'
 
+    if (providerId === 'gemini' && mode === 'image-to-video') {
+      showToast('NanoBanana 当前不支持图生视频')
+      return
+    }
+
     const job: GenerationItem = {
       id: crypto.randomUUID(),
       title: makeTitle(cleanPrompt),
       prompt: cleanPrompt,
+      providerId,
       mode,
       status: 'RUNNING',
       resultUrls: [],
@@ -297,35 +380,34 @@ function App() {
     let trackedJob = job
 
     try {
-      let submitData
-
       if (imageInput) {
-        showToast('正在上传参考图到 RunningHub')
-        const imageUrl = await uploadImage(settings.apiKey.trim(), imageInput.file)
-        submitData =
-          mode === 'image-to-video'
-            ? await submitImageToVideoTask(settings, cleanPrompt, imageUrl)
-            : await submitImageToImageTask(settings, cleanPrompt, imageUrl)
-      } else {
-        submitData = await submitTextToImageTask(settings, cleanPrompt)
+        showToast(providerId === 'gemini' ? '正在读取参考图' : '正在上传参考图到 RunningHub')
       }
 
-      if (!submitData.taskId) {
-        throw new Error('提交成功，但 RunningHub 没有返回任务 ID。')
-      }
+      const submitData =
+        providerId === 'gemini'
+          ? await submitGeminiWorkflow(geminiSettings, cleanPrompt, mode, imageInput?.file)
+          : await submitRunningHubWorkflow(runningHubSettings, cleanPrompt, mode, imageInput?.file)
 
-      trackedJob = { ...job, taskId: submitData.taskId, status: submitData.status ?? 'RUNNING' }
+      trackedJob = mergeProviderTask(job, submitData)
       setActiveJob(trackedJob)
       upsertHistory(trackedJob)
 
-      const completedJob = await pollRunningHubTask(trackedJob, settings.apiKey.trim())
-      setActiveJob(completedJob)
-      upsertHistory(completedJob)
+      if (providerId === 'runninghub') {
+        if (!trackedJob.taskId) {
+          throw new Error('提交成功，但 RunningHub 没有返回任务 ID。')
+        }
+
+        const completedJob = await pollRunningHubTask(trackedJob)
+        setActiveJob(completedJob)
+        upsertHistory(completedJob)
+      }
     } catch (error) {
+      const adapter = providerId === 'gemini' ? geminiAdapter : runningHubAdapter
       const failedJob: GenerationItem = {
         ...trackedJob,
         status: 'FAILED',
-        errorMessage: getErrorMessage(error),
+        errorMessage: getErrorMessage(adapter.normalizeError(error)),
       }
       setActiveJob(failedJob)
       upsertHistory(failedJob)
@@ -334,18 +416,22 @@ function App() {
     }
   }
 
-  const pollRunningHubTask = async (job: GenerationItem, apiKey: string): Promise<GenerationItem> => {
+  const pollRunningHubTask = async (job: GenerationItem): Promise<GenerationItem> => {
     for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt += 1) {
       await wait(POLL_INTERVAL_MS)
 
-      const queryData = await queryTask(apiKey, job.taskId)
+      if (!job.taskId || !runningHubAdapter.queryTask) {
+        throw new Error('RunningHub 未提供可查询的任务 ID。')
+      }
 
-      const nextStatus = queryData.status ?? 'RUNNING'
+      const queryData = await runningHubAdapter.queryTask(runningHubSettings, job.taskId)
+
+      const nextStatus = queryData.status
       const nextJob = { ...job, status: nextStatus }
       setActiveJob(nextJob)
 
       if (nextStatus === 'SUCCESS') {
-        const resultUrls = extractResultUrls(queryData.results)
+        const resultUrls = extractProviderUrls(queryData)
 
         return {
           ...nextJob,
@@ -384,7 +470,6 @@ function App() {
           >
             {sidebarOpen ? '‹' : '›'}
           </button>
-          {sidebarOpen && <span className="brand-mark">CW</span>}
         </div>
 
         {sidebarOpen && (
@@ -446,14 +531,6 @@ function App() {
             <h1>开始创作吧！</h1>
           </div>
 
-          <div className="status-card">
-            <div>
-              <span className={`status-dot ${isConnected ? '' : 'is-muted'}`} />
-              RunningHub · {isConnected ? '已连接' : '未连接'}
-            </div>
-            <span>{maskedKey}</span>
-          </div>
-
           {displayJob && (
             <article className={`preview-card ${displayJob.status === 'FAILED' ? 'is-error' : ''}`}>
               <div className="preview-header">
@@ -466,8 +543,8 @@ function App() {
 
               {displayJob.status === 'SUCCESS' && displayJob.resultUrls.length > 0 ? (
                 <div className={`result-grid ${displayJob.mode === 'image-to-video' ? 'has-video' : ''}`}>
-                  {displayJob.resultUrls.map((url) => (
-                    <figure className="result-image" key={url}>
+                  {displayJob.resultUrls.map((url, index) => (
+                    <figure className="result-image" key={`${displayJob.id}-${index}`}>
                       {isVideoResult(url, displayJob.mode) ? (
                         <video src={url} controls playsInline />
                       ) : (
@@ -510,7 +587,9 @@ function App() {
                   </span>
                 ))}
               </div>
-              <p className="expiry-note">RunningHub 返回的结果链接约 24 小时后可能失效，请及时下载。</p>
+              {(displayJob.providerId ?? 'runninghub') === 'runninghub' && (
+                <p className="expiry-note">RunningHub 返回的结果链接约 24 小时后可能失效，请及时下载。</p>
+              )}
             </article>
           )}
         </section>
@@ -556,19 +635,27 @@ function App() {
                   >
                     图生图
                   </button>
-                  <button
-                    className={referenceMode === 'image-to-video' ? 'is-active' : ''}
-                    type="button"
-                    aria-pressed={referenceMode === 'image-to-video'}
-                    onClick={() => selectReferenceMode('image-to-video')}
-                  >
-                    图生视频
-                  </button>
+                  {activeProvider === 'runninghub' && (
+                    <button
+                      className={referenceMode === 'image-to-video' ? 'is-active' : ''}
+                      type="button"
+                      aria-pressed={referenceMode === 'image-to-video'}
+                      onClick={() => selectReferenceMode('image-to-video')}
+                    >
+                      图生视频
+                    </button>
+                  )}
                 </span>
               ) : (
                 <button type="button">文生图</button>
               )}
-              <button type="button">RunningHub</button>
+              <label className="provider-picker">
+                <span className="sr-only">创作平台</span>
+                <select value={activeProvider} onChange={(event) => selectProvider(event.target.value as ProviderId)}>
+                  <option value="runninghub">RunningHub</option>
+                  <option value="gemini">NanoBanana</option>
+                </select>
+              </label>
               <button type="button">比例 自动</button>
               <button type="button">中文</button>
             </div>
@@ -593,32 +680,127 @@ function App() {
         onClick={() => setSettingsOpen(false)}
         aria-hidden="true"
       />
-      <aside className={`settings-drawer ${settingsOpen ? 'is-open' : ''}`} aria-label="RunningHub 设置">
+      <aside className={`settings-drawer ${settingsOpen ? 'is-open' : ''}`} aria-label="平台连接设置">
         <div className="drawer-header">
           <div>
             <p>连接设置</p>
-            <h2>RunningHub</h2>
+            <h2>{settingsProvider === 'gemini' ? 'NanoBanana' : 'RunningHub'}</h2>
           </div>
           <button className="icon-button" type="button" aria-label="关闭设置" onClick={() => setSettingsOpen(false)}>
             ×
           </button>
         </div>
 
-        <label>
-          API Key
-          <span className={`key-state ${isConnected ? 'is-connected' : ''}`}>
-            {isConnected ? '已连接，密钥只保存在当前浏览器' : '未连接'}
-          </span>
-          <input
-            type="password"
-            value={settings.apiKey}
-            placeholder="粘贴你的 RunningHub API Key"
-            onChange={(event) => setSettings({ ...settings, apiKey: event.target.value })}
-          />
-        </label>
+        <div className="provider-tabs" aria-label="选择设置平台">
+          <button
+            className={settingsProvider === 'runninghub' ? 'is-active' : ''}
+            type="button"
+            aria-pressed={settingsProvider === 'runninghub'}
+            onClick={() => setSettingsProvider('runninghub')}
+          >
+            RunningHub
+          </button>
+          <button
+            className={settingsProvider === 'gemini' ? 'is-active' : ''}
+            type="button"
+            aria-pressed={settingsProvider === 'gemini'}
+            onClick={() => setSettingsProvider('gemini')}
+          >
+            NanoBanana
+          </button>
+        </div>
 
-        <button className="save-button" type="button" onClick={saveSettings}>
-          保存设置
+        {settingsProvider === 'runninghub' ? (
+          <label>
+            API Key
+            <span className={`key-state ${runningHubSettings.apiKey.trim() ? 'is-connected' : ''}`}>
+              {runningHubSettings.apiKey.trim() ? '已连接，密钥保存在当前浏览器' : '未连接'}
+            </span>
+            <input
+              type="password"
+              autoComplete="off"
+              value={runningHubSettings.apiKey}
+              placeholder="粘贴你的 RunningHub API Key"
+              onChange={(event) => setRunningHubSettings({ ...runningHubSettings, apiKey: event.target.value })}
+            />
+          </label>
+        ) : (
+          <>
+            <p className="provider-scope">{getGeminiProtocolDescription(geminiSettings.protocol)}</p>
+            <label>
+              接口协议
+              <select
+                value={geminiSettings.protocol}
+                onChange={(event) =>
+                  setGeminiSettings({
+                    ...geminiSettings,
+                    protocol: event.target.value as GeminiSettings['protocol'],
+                  })
+                }
+              >
+                <option value="google-interactions">Google Gemini Interactions</option>
+                <option value="newapi-gemini">New API 原生 Gemini</option>
+                <option value="openai-images">OpenAI Images 兼容</option>
+              </select>
+            </label>
+            <label>
+              API Base URL
+              <input
+                type="url"
+                spellCheck="false"
+                value={geminiSettings.baseUrl}
+                placeholder="https://generativelanguage.googleapis.com/v1"
+                onChange={(event) => setGeminiSettings({ ...geminiSettings, baseUrl: event.target.value })}
+              />
+            </label>
+            <label>
+              Model ID
+              <input
+                type="text"
+                spellCheck="false"
+                value={geminiSettings.modelId}
+                placeholder="gemini-3.1-flash-image"
+                onChange={(event) => setGeminiSettings({ ...geminiSettings, modelId: event.target.value })}
+              />
+            </label>
+            <label>
+              API Key
+              <span className={`key-state ${geminiSettings.apiKey.trim() ? 'is-connected' : ''}`}>
+                {geminiSettings.apiKey.trim() ? '已填写，将由浏览器发送到接口地址' : '未连接'}
+              </span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={geminiSettings.apiKey}
+                placeholder="粘贴你的 API Key"
+                onChange={(event) => setGeminiSettings({ ...geminiSettings, apiKey: event.target.value })}
+              />
+            </label>
+            <label className="remember-key">
+              <input
+                type="checkbox"
+                checked={geminiSettings.rememberApiKey}
+                onChange={(event) =>
+                  setGeminiSettings({ ...geminiSettings, rememberApiKey: event.target.checked })
+                }
+              />
+              <span>在此设备记住密钥</span>
+            </label>
+            <p className="key-guidance">
+              默认仅保存到当前浏览器会话。启用记住后，密钥会保存在此设备的浏览器存储中。
+            </p>
+          </>
+        )}
+
+        <button
+          className="save-button"
+          type="button"
+          onClick={() => {
+            saveSettings()
+            selectProvider(settingsProvider)
+          }}
+        >
+          保存并使用
         </button>
         {savedNotice && <p className="saved-notice">{savedNotice}</p>}
       </aside>
@@ -633,6 +815,26 @@ function wait(ms: number) {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms)
   })
+}
+
+async function submitGeminiWorkflow(
+  settings: GeminiSettings,
+  prompt: string,
+  mode: GenerationMode,
+  file?: File,
+) {
+  const media = file && geminiAdapter.uploadMedia ? [await geminiAdapter.uploadMedia(settings, file)] : undefined
+  return geminiAdapter.submitTask(settings, { prompt, capability: mode, media })
+}
+
+async function submitRunningHubWorkflow(
+  settings: RunningHubSettings,
+  prompt: string,
+  mode: GenerationMode,
+  file?: File,
+) {
+  const media = file && runningHubAdapter.uploadMedia ? [await runningHubAdapter.uploadMedia(settings, file)] : undefined
+  return runningHubAdapter.submitTask(settings, { prompt, capability: mode, media })
 }
 
 function makeTitle(prompt: string) {
@@ -651,14 +853,15 @@ function getErrorMessage(error: unknown) {
   return '生成失败，请稍后重试。'
 }
 
-function mergeQueryResult(job: GenerationItem, queryData: RunningHubResponse): GenerationItem {
-  const nextStatus = queryData.status ?? 'RUNNING'
+function mergeProviderTask(job: GenerationItem, task: ProviderTask): GenerationItem {
+  const nextStatus = task.status
 
   if (nextStatus === 'SUCCESS') {
-    const resultUrls = extractResultUrls(queryData.results)
+    const resultUrls = extractProviderUrls(task)
 
     return {
       ...job,
+      taskId: task.taskId ?? job.taskId,
       status: 'SUCCESS',
       resultUrls,
       errorMessage: resultUrls.length ? undefined : '任务成功，但没有返回结果链接。',
@@ -668,15 +871,44 @@ function mergeQueryResult(job: GenerationItem, queryData: RunningHubResponse): G
   if (nextStatus === 'FAILED') {
     return {
       ...job,
+      taskId: task.taskId ?? job.taskId,
       status: 'FAILED',
-      errorMessage: queryData.errorMessage || 'RunningHub 任务生成失败。',
+      errorMessage: task.errorMessage || '平台生成任务失败。',
     }
   }
 
   return {
     ...job,
-    status: 'PENDING_RESULT',
-    errorMessage: 'RunningHub 仍在生成，可以稍后再次刷新结果。',
+    taskId: task.taskId ?? job.taskId,
+    status: nextStatus,
+    errorMessage: task.errorMessage,
+  }
+}
+
+function extractProviderUrls(task: ProviderTask) {
+  return task.outputs.map((output) => output.url).filter((url): url is string => Boolean(url))
+}
+
+function sanitizeHistoryForStorage(history: GenerationItem[]) {
+  return history.map((item) => ({
+    ...item,
+    resultUrls: item.resultUrls.filter((url) => !url.startsWith('data:')),
+    errorMessage:
+      item.status === 'SUCCESS' && item.resultUrls.some((url) => url.startsWith('data:'))
+        ? 'NanoBanana 图片只保留在生成时的页面中，请及时下载。'
+        : item.errorMessage,
+  }))
+}
+
+function readStoredObject<T>(key: string): T | null {
+  const value = window.localStorage.getItem(key)
+  if (!value) return null
+
+  try {
+    return JSON.parse(value) as T
+  } catch {
+    window.localStorage.removeItem(key)
+    return null
   }
 }
 
@@ -717,7 +949,10 @@ function getJobMessage(job: GenerationItem) {
   }
 
   if (job.status === 'RUNNING') {
-    return job.mode === 'image-to-video' ? 'RunningHub 正在生成视频，请稍等。' : 'RunningHub 正在生成图片，请稍等。'
+    const providerName = (job.providerId ?? 'runninghub') === 'gemini' ? 'NanoBanana' : 'RunningHub'
+    return job.mode === 'image-to-video'
+      ? `${providerName} 正在生成视频，请稍等。`
+      : `${providerName} 正在生成图片，请稍等。`
   }
 
   if (job.status === 'PENDING_RESULT') {
