@@ -13,20 +13,16 @@
       "destination": "http://38.145.218.40:12001/interactions"
     },
     {
-      "source": "/api/runninghub/task/openapi/create",
-      "destination": "https://www.runninghub.ai/task/openapi/create"
+      "source": "/api/runninghub/openapi/v2/run/workflow/:workflowId",
+      "destination": "https://www.runninghub.cn/openapi/v2/run/workflow/:workflowId"
     },
     {
-      "source": "/api/runninghub/task/openapi/status",
-      "destination": "https://www.runninghub.ai/task/openapi/status"
+      "source": "/api/runninghub/openapi/v2/query",
+      "destination": "https://www.runninghub.cn/openapi/v2/query"
     },
     {
-      "source": "/api/runninghub/task/openapi/outputs",
-      "destination": "https://www.runninghub.ai/task/openapi/outputs"
-    },
-    {
-      "source": "/api/runninghub/task/openapi/upload",
-      "destination": "https://www.runninghub.ai/task/openapi/upload"
+      "source": "/api/runninghub/openapi/v2/media/upload/binary",
+      "destination": "https://www.runninghub.cn/openapi/v2/media/upload/binary"
     }
   ]
 }

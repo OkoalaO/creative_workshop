@@ -48,16 +48,14 @@ export type RunningHubUploadResponse = {
 }
 
 type RunWorkflowPayload = {
-  apiKey: string
-  workflowId: string
   addMetadata: boolean
   nodeInfoList: unknown
   instanceType: RunningHubSettings['instanceType']
-  usePersonalQueue: false
+  usePersonalQueue: 'false'
 }
 
-const RUNNINGHUB_BASE_URL = 'https://www.runninghub.ai'
-const RUNNINGHUB_PROXY_PREFIX = '/api/runninghub'
+const RUNNINGHUB_BASE_URL = 'https://www.runninghub.cn/openapi/v2'
+const RUNNINGHUB_PROXY_PREFIX = '/api/runninghub/openapi/v2'
 const IMAGE_TO_IMAGE_WORKFLOW_ID = '2004148282525949953'
 const IMAGE_TO_VIDEO_WORKFLOW_ID = '2073634201202679809'
 const IMAGE_TO_IMAGE_NODE_TEMPLATE =
@@ -75,12 +73,10 @@ export const defaultRunningHubSettings: RunningHubSettings = {
 
 export function buildTextToImagePayload(settings: RunningHubSettings, prompt: string): RunWorkflowPayload {
   return {
-    apiKey: settings.apiKey.trim(),
-    workflowId: settings.workflowId,
     addMetadata: true,
     nodeInfoList: buildNodeInfoList(settings.nodeTemplate, { prompt }),
     instanceType: settings.instanceType,
-    usePersonalQueue: false,
+    usePersonalQueue: 'false',
   }
 }
 
@@ -90,12 +86,10 @@ export function buildImageToImagePayload(
   imageUrl: string,
 ): RunWorkflowPayload {
   return {
-    apiKey: settings.apiKey.trim(),
-    workflowId: IMAGE_TO_IMAGE_WORKFLOW_ID,
     addMetadata: true,
     nodeInfoList: buildNodeInfoList(IMAGE_TO_IMAGE_NODE_TEMPLATE, { prompt, imageUrl }),
     instanceType: settings.instanceType,
-    usePersonalQueue: false,
+    usePersonalQueue: 'false',
   }
 }
 
@@ -105,17 +99,15 @@ export function buildImageToVideoPayload(
   imageUrl: string,
 ): RunWorkflowPayload {
   return {
-    apiKey: settings.apiKey.trim(),
-    workflowId: IMAGE_TO_VIDEO_WORKFLOW_ID,
     addMetadata: true,
     nodeInfoList: buildNodeInfoList(IMAGE_TO_VIDEO_NODE_TEMPLATE, { prompt, imageUrl }),
     instanceType: settings.instanceType,
-    usePersonalQueue: false,
+    usePersonalQueue: 'false',
   }
 }
 
 export async function submitTextToImageTask(settings: RunningHubSettings, prompt: string) {
-  const response = await fetch(buildRunningHubUrl('/task/openapi/create'), {
+  const response = await fetch(buildRunningHubUrl(`/run/workflow/${settings.workflowId}`), {
     method: 'POST',
     headers: buildHeaders(settings.apiKey),
     body: JSON.stringify(buildTextToImagePayload(settings, prompt)),
@@ -126,11 +118,9 @@ export async function submitTextToImageTask(settings: RunningHubSettings, prompt
 
 export async function uploadImage(apiKey: string, file: File) {
   const formData = new FormData()
-  formData.append('apiKey', apiKey.trim())
   formData.append('file', file)
-  formData.append('fileType', 'input')
 
-  const response = await fetch(buildRunningHubUrl('/task/openapi/upload'), {
+  const response = await fetch(buildRunningHubUrl('/media/upload/binary'), {
     method: 'POST',
     headers: buildAuthHeaders(apiKey),
     body: formData,
@@ -141,16 +131,16 @@ export async function uploadImage(apiKey: string, file: File) {
     throw new Error(data.message || data.msg || `上传失败，HTTP ${response.status}`)
   }
 
-  const imageUrl = data.data?.fileName || data.data?.download_url
+  const imageUrl = data.data?.download_url || data.data?.fileName
   if (!imageUrl) {
-    throw new Error('图片已上传，但 RunningHub 没有返回 fileName。')
+    throw new Error('图片已上传，但 RunningHub 没有返回可用链接。')
   }
 
   return imageUrl
 }
 
 export async function submitImageToImageTask(settings: RunningHubSettings, prompt: string, imageUrl: string) {
-  const response = await fetch(buildRunningHubUrl('/task/openapi/create'), {
+  const response = await fetch(buildRunningHubUrl(`/run/workflow/${IMAGE_TO_IMAGE_WORKFLOW_ID}`), {
     method: 'POST',
     headers: buildHeaders(settings.apiKey),
     body: JSON.stringify(buildImageToImagePayload(settings, prompt, imageUrl)),
@@ -160,7 +150,7 @@ export async function submitImageToImageTask(settings: RunningHubSettings, promp
 }
 
 export async function submitImageToVideoTask(settings: RunningHubSettings, prompt: string, imageUrl: string) {
-  const response = await fetch(buildRunningHubUrl('/task/openapi/create'), {
+  const response = await fetch(buildRunningHubUrl(`/run/workflow/${IMAGE_TO_VIDEO_WORKFLOW_ID}`), {
     method: 'POST',
     headers: buildHeaders(settings.apiKey),
     body: JSON.stringify(buildImageToVideoPayload(settings, prompt, imageUrl)),
@@ -174,27 +164,13 @@ export async function queryTask(apiKey: string, taskId: string | undefined): Pro
     throw new Error('缺少 RunningHub 任务 ID，无法查询结果。')
   }
 
-  const statusResponse = await fetch(buildRunningHubUrl('/task/openapi/status'), {
+  const response = await fetch(buildRunningHubUrl('/query'), {
     method: 'POST',
     headers: buildHeaders(apiKey),
-    body: JSON.stringify({ apiKey: apiKey.trim(), taskId }),
+    body: JSON.stringify({ taskId }),
   })
-  const statusData = await parseRunningHubResponse(statusResponse, '查询任务状态失败')
-  const status = normalizeTaskStatus(statusData.data) ?? statusData.status
 
-  if (status && status !== 'SUCCESS') {
-    return { ...statusData, taskId, status }
-  }
-
-  const outputsResponse = await fetch(buildRunningHubUrl('/task/openapi/outputs'), {
-    method: 'POST',
-    headers: buildHeaders(apiKey),
-    body: JSON.stringify({ apiKey: apiKey.trim(), taskId }),
-  })
-  const outputsData = await parseRunningHubResponse(outputsResponse, '查询任务结果失败')
-  const results = Array.isArray(outputsData.data) ? outputsData.data.map(normalizeResult) : []
-
-  return { ...outputsData, taskId, status: results.length ? 'SUCCESS' : status ?? 'RUNNING', results }
+  return parseRunningHubResponse(response, '查询失败')
 }
 
 export function extractResultUrls(results: RunningHubResult[] | null | undefined) {
@@ -265,28 +241,4 @@ async function parseRunningHubResponse(response: Response, fallbackMessage: stri
   }
 
   return data
-}
-
-function normalizeTaskStatus(data: RunningHubResponse['data']): RunningHubStatus | undefined {
-  if (typeof data === 'string') {
-    return isRunningHubStatus(data) ? data : undefined
-  }
-
-  if (data && !Array.isArray(data) && isRunningHubStatus(data.taskStatus)) {
-    return data.taskStatus
-  }
-
-  return undefined
-}
-
-function normalizeResult(result: RunningHubResult): RunningHubResult {
-  return {
-    ...result,
-    url: result.url || result.fileUrl,
-    outputType: result.outputType || result.fileType,
-  }
-}
-
-function isRunningHubStatus(value: unknown): value is RunningHubStatus {
-  return value === 'IDLE' || value === 'QUEUED' || value === 'RUNNING' || value === 'SUCCESS' || value === 'FAILED'
 }

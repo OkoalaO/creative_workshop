@@ -1,5 +1,18 @@
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ArrowUp,
+  Copy,
+  Download,
+  ExternalLink,
+  History,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Settings2,
+  Trash2,
+  X,
+} from 'lucide-react'
+import {
   defaultRunningHubSettings,
   type RunningHubSettings,
   type RunningHubStatus,
@@ -13,6 +26,7 @@ import {
   type ProviderTask,
   runningHubAdapter,
 } from './providers'
+import AuroraBackground from './components/AuroraBackground'
 import './App.css'
 
 type GenerationMode = 'text-to-image' | 'image-to-image' | 'image-to-video'
@@ -52,7 +66,7 @@ function App() {
   const [referenceImage, setReferenceImage] = useState<ReferenceImage | null>(null)
   const [referenceMode, setReferenceMode] = useState<ReferenceMode>('image-to-image')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedId, setSelectedId] = useState('')
   const [activeProvider, setActiveProvider] = useState<ProviderId>('runninghub')
   const [settingsProvider, setSettingsProvider] = useState<ProviderId>('runninghub')
@@ -64,6 +78,7 @@ function App() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [toastMessage, setToastMessage] = useState('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
 
   useEffect(() => {
     const savedRunningHubSettings = window.localStorage.getItem(RUNNINGHUB_SETTINGS_KEY)
@@ -107,6 +122,28 @@ function App() {
       }
     }
   }, [referenceImage])
+
+  useEffect(() => {
+    const closeDrawers = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSettingsOpen(false)
+        setHistoryOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', closeDrawers)
+    return () => window.removeEventListener('keydown', closeDrawers)
+  }, [])
+
+  useEffect(() => {
+    const textarea = promptInputRef.current
+    if (!textarea) return
+
+    textarea.style.height = 'auto'
+    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 40), 300)
+    textarea.style.height = `${nextHeight}px`
+    textarea.style.overflowY = textarea.scrollHeight > 300 ? 'auto' : 'hidden'
+  }, [prompt])
 
   const selectedHistory = useMemo(
     () => history.find((item) => item.id === selectedId) ?? history[0] ?? null,
@@ -158,12 +195,24 @@ function App() {
     clearReferenceImage()
     setActiveJob(null)
     setSelectedId('')
+    setHistoryOpen(false)
   }
 
   const clearHistory = () => {
     saveHistory([])
     setSelectedId('')
     setActiveJob(null)
+  }
+
+  const removeHistoryItem = (itemId: string) => {
+    const nextHistory = history.filter((item) => item.id !== itemId)
+    saveHistory(nextHistory)
+
+    if (selectedId === itemId) {
+      setSelectedId(nextHistory[0]?.id ?? '')
+    }
+
+    setActiveJob((currentJob) => (currentJob?.id === itemId ? null : currentJob))
   }
 
   const selectHistoryItem = (item: GenerationItem) => {
@@ -178,6 +227,8 @@ function App() {
     if (item.mode === 'image-to-image' || item.mode === 'image-to-video') {
       setReferenceMode(item.mode)
     }
+
+    setHistoryOpen(false)
   }
 
   const retryJob = (item: GenerationItem) => {
@@ -455,92 +506,47 @@ function App() {
   return (
     <main className="app-shell">
       <div className="scene" aria-hidden="true">
-        <div className="aurora aurora-one" />
-        <div className="aurora aurora-two" />
+        <AuroraBackground />
         <div className="grid-glow" />
       </div>
 
-      <aside className={`sidebar ${sidebarOpen ? 'is-open' : 'is-collapsed'}`}>
-        <div className="sidebar-top">
-          <button
-            className="icon-button sidebar-toggle"
-            type="button"
-            aria-label={sidebarOpen ? '收起侧边栏' : '展开侧边栏'}
-            onClick={() => setSidebarOpen((open) => !open)}
-          >
-            {sidebarOpen ? '‹' : '›'}
-          </button>
-        </div>
+      <nav className="quick-tools" aria-label="创作工具">
+        <button
+          className="icon-button"
+          type="button"
+          aria-label="打开设置"
+          title="设置"
+          onClick={() => {
+            setHistoryOpen(false)
+            setSettingsOpen(true)
+          }}
+        >
+          <Settings2 aria-hidden="true" />
+        </button>
+        <button className="icon-button" type="button" aria-label="新对话" title="新对话" onClick={startNewChat}>
+          <Plus aria-hidden="true" />
+        </button>
+        <button
+          className={`icon-button ${historyOpen ? 'is-active' : ''}`}
+          type="button"
+          aria-label="历史记录"
+          aria-expanded={historyOpen}
+          title="历史记录"
+          onClick={() => {
+            setSettingsOpen(false)
+            setHistoryOpen((open) => !open)
+          }}
+        >
+          <History aria-hidden="true" />
+        </button>
+      </nav>
 
-        {sidebarOpen && (
-          <>
-            <button className="new-chat" type="button" onClick={startNewChat}>
-              <span>＋</span>
-              新对话
-            </button>
-
-            <section className="history-section">
-              <div className="history-heading">
-                <p className="section-label">历史创作</p>
-                {history.length > 0 && (
-                  <button type="button" onClick={clearHistory}>
-                    清空
-                  </button>
-                )}
-              </div>
-              <div className="history-list">
-                {history.length ? (
-                  history.map((item) => (
-                    <button
-                      className={`history-item ${item.id === selectedId ? 'is-active' : ''}`}
-                      type="button"
-                      key={item.id}
-                      onClick={() => selectHistoryItem(item)}
-                    >
-                      <span className="history-thumb">
-                        {getThumbnail(item) ? <img src={getThumbnail(item)} alt="" /> : <span />}
-                      </span>
-                      <span className="history-copy">
-                        <span className="history-title">{item.title}</span>
-                        <span className="history-meta">
-                          {formatTime(item.createdAt)} · {formatStatus(item.status)}
-                        </span>
-                      </span>
-                    </button>
-                  ))
-                ) : (
-                  <p className="empty-history">暂无历史</p>
-                )}
-              </div>
-            </section>
-          </>
-        )}
-      </aside>
+      <p className="brand-mark">CREATIVE WORKSHOP</p>
 
       <section className="workspace">
-        <header className="topbar">
-          <button className="settings-button" type="button" onClick={() => setSettingsOpen(true)}>
-            <span>⚙</span>
-            设置
-          </button>
-        </header>
-
         <section className="conversation-panel">
-          <div className="hero-copy">
-            <p className="eyebrow">CREATIVE WORKSHOP</p>
-            <h1>开始创作吧！</h1>
-          </div>
-
           {displayJob && (
-            <article className={`preview-card ${displayJob.status === 'FAILED' ? 'is-error' : ''}`}>
-              <div className="preview-header">
-                <div>
-                  <p>{displayJob.title}</p>
-                  <span>{displayJob.prompt || '等待输入创作描述'}</span>
-                </div>
-                <span>{formatStatus(displayJob.status)}</span>
-              </div>
-
+            <article className={`result-stage ${displayJob.status === 'FAILED' ? 'is-error' : ''}`}>
               {displayJob.status === 'SUCCESS' && displayJob.resultUrls.length > 0 ? (
                 <div className={`result-grid ${displayJob.mode === 'image-to-video' ? 'has-video' : ''}`}>
                   {displayJob.resultUrls.map((url, index) => (
@@ -550,11 +556,6 @@ function App() {
                       ) : (
                         <img src={url} alt={displayJob.prompt} />
                       )}
-                      <figcaption>
-                        <a href={url} target="_blank" rel="noreferrer">
-                          {isVideoResult(url, displayJob.mode) ? '打开视频' : '打开图片'}
-                        </a>
-                      </figcaption>
                     </figure>
                   ))}
                 </div>
@@ -567,22 +568,26 @@ function App() {
 
               {displayJob.taskId && <p className="task-id">Task ID：{displayJob.taskId}</p>}
               <div className="result-actions">
-                <button type="button" onClick={() => retryJob(displayJob)} disabled={isGenerating}>
-                  重新生成
+                {displayJob.resultUrls[0] && (
+                  <a href={displayJob.resultUrls[0]} target="_blank" rel="noreferrer" aria-label="打开结果" title="打开结果">
+                    <ExternalLink aria-hidden="true" />
+                  </a>
+                )}
+                <button type="button" onClick={() => retryJob(displayJob)} disabled={isGenerating} aria-label="重新生成" title="重新生成">
+                  <RotateCcw aria-hidden="true" />
                 </button>
                 {displayJob.taskId && (
-                  <button type="button" onClick={() => refreshJobResult(displayJob)} disabled={isGenerating}>
-                    刷新结果
+                  <button type="button" onClick={() => refreshJobResult(displayJob)} disabled={isGenerating} aria-label="刷新结果" title="刷新结果">
+                    <RefreshCw aria-hidden="true" />
                   </button>
                 )}
                 {displayJob.resultUrls.map((url, index) => (
                   <span className="image-actions" key={url}>
-                    <button type="button" onClick={() => copyImageLink(url)}>
-                      复制链接{displayJob.resultUrls.length > 1 ? index + 1 : ''}
+                    <button type="button" onClick={() => copyImageLink(url)} aria-label={`复制结果链接${index + 1}`} title="复制链接">
+                      <Copy aria-hidden="true" />
                     </button>
-                    <a href={url} download target="_blank" rel="noreferrer">
-                      下载{isVideoResult(url, displayJob.mode) ? '视频' : '图片'}
-                      {displayJob.resultUrls.length > 1 ? index + 1 : ''}
+                    <a href={url} download target="_blank" rel="noreferrer" aria-label={`下载结果${index + 1}`} title="下载">
+                      <Download aria-hidden="true" />
                     </a>
                   </span>
                 ))}
@@ -604,6 +609,7 @@ function App() {
             </div>
           )}
           <textarea
+            ref={promptInputRef}
             value={prompt}
             maxLength={2000}
             onChange={(event) => setPrompt(event.target.value)}
@@ -623,7 +629,7 @@ function App() {
                 aria-label="上传参考图"
                 onClick={openReferencePicker}
               >
-                ＋
+                <Plus aria-hidden="true" />
               </button>
               {referenceImage ? (
                 <span className="mode-switch" aria-label="选择参考图工作流">
@@ -656,19 +662,18 @@ function App() {
                   <option value="gemini">NanoBanana</option>
                 </select>
               </label>
-              <button type="button">比例 自动</button>
-              <button type="button">中文</button>
             </div>
             <div className="composer-actions">
               <span>{prompt.length}/2000</span>
               <button
-                className="send-button"
+                className={`send-button ${isGenerating ? 'is-generating' : ''}`}
                 type="button"
-                aria-label="生成内容"
-                disabled={isGenerating}
-                onClick={() => runWorkflow()}
+                aria-label={isGenerating ? '停止生成' : '生成内容'}
+                onClick={() => {
+                  if (!isGenerating) runWorkflow()
+                }}
               >
-                {isGenerating ? '生成中' : '↑'}
+                {isGenerating ? <span className="stop-glyph" aria-hidden="true" /> : <ArrowUp aria-hidden="true" />}
               </button>
             </div>
           </div>
@@ -676,10 +681,61 @@ function App() {
       </section>
 
       <div
-        className={`drawer-backdrop ${settingsOpen ? 'is-open' : ''}`}
-        onClick={() => setSettingsOpen(false)}
+        className={`drawer-backdrop ${settingsOpen || historyOpen ? 'is-open' : ''}`}
+        onClick={() => {
+          setSettingsOpen(false)
+          setHistoryOpen(false)
+        }}
         aria-hidden="true"
       />
+      <aside className={`history-drawer ${historyOpen ? 'is-open' : ''}`} aria-label="历史记录">
+        <div className="history-heading">
+          <div>
+            <p className="section-label">历史记录</p>
+            <span>{history.length} 条创作</span>
+          </div>
+          <div className="history-heading-actions">
+            {history.length > 0 && (
+              <button className="icon-button" type="button" onClick={clearHistory} aria-label="清空历史" title="清空历史">
+                <Trash2 aria-hidden="true" />
+              </button>
+            )}
+            <button className="icon-button" type="button" onClick={() => setHistoryOpen(false)} aria-label="关闭历史记录" title="关闭">
+              <X aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+        <div className="history-list">
+          {history.length ? (
+            history.map((item) => (
+              <div className={`history-row ${item.id === selectedId ? 'is-active' : ''}`} key={item.id}>
+                <button className="history-item" type="button" onClick={() => selectHistoryItem(item)}>
+                  <span className="history-thumb">
+                    {getThumbnail(item) ? <img src={getThumbnail(item)} alt="" /> : <span />}
+                  </span>
+                  <span className="history-copy">
+                    <span className="history-title">{item.title}</span>
+                    <span className="history-meta">
+                      {formatTime(item.createdAt)} · {formatStatus(item.status)}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  className="history-delete"
+                  type="button"
+                  aria-label={`删除历史记录：${item.title}`}
+                  title="删除"
+                  onClick={() => removeHistoryItem(item.id)}
+                >
+                  <Trash2 aria-hidden="true" />
+                </button>
+              </div>
+            ))
+          ) : (
+            <p className="empty-history">暂无历史记录</p>
+          )}
+        </div>
+      </aside>
       <aside className={`settings-drawer ${settingsOpen ? 'is-open' : ''}`} aria-label="平台连接设置">
         <div className="drawer-header">
           <div>
@@ -687,7 +743,7 @@ function App() {
             <h2>{settingsProvider === 'gemini' ? 'NanoBanana' : 'RunningHub'}</h2>
           </div>
           <button className="icon-button" type="button" aria-label="关闭设置" onClick={() => setSettingsOpen(false)}>
-            ×
+            <X aria-hidden="true" />
           </button>
         </div>
 
