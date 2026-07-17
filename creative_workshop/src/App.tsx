@@ -76,9 +76,11 @@ function App() {
   const [history, setHistory] = useState<GenerationItem[]>([])
   const [activeJob, setActiveJob] = useState<GenerationItem | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [downloadingUrl, setDownloadingUrl] = useState('')
   const [toastMessage, setToastMessage] = useState('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const downloadInProgressRef = useRef(false)
 
   useEffect(() => {
     const savedRunningHubSettings = window.localStorage.getItem(RUNNINGHUB_SETTINGS_KEY)
@@ -280,6 +282,33 @@ function App() {
       showToast('图片链接已复制')
     } catch {
       showToast('复制失败，请打开图片后手动复制')
+    }
+  }
+
+  const downloadResult = async (url: string, index: number) => {
+    if (downloadInProgressRef.current) return
+
+    downloadInProgressRef.current = true
+    setDownloadingUrl(url)
+    try {
+      const response = await fetch(url)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+      const blob = await response.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = makeDownloadFilename(url, blob.type, index)
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+      showToast('下载已开始')
+    } catch {
+      showToast('下载失败，请复制链接后在浏览器中保存')
+    } finally {
+      downloadInProgressRef.current = false
+      setDownloadingUrl('')
     }
   }
 
@@ -586,9 +615,15 @@ function App() {
                     <button type="button" onClick={() => copyImageLink(url)} aria-label={`复制结果链接${index + 1}`} title="复制链接">
                       <Copy aria-hidden="true" />
                     </button>
-                    <a href={url} download target="_blank" rel="noreferrer" aria-label={`下载结果${index + 1}`} title="下载">
+                    <button
+                      type="button"
+                      disabled={Boolean(downloadingUrl)}
+                      onClick={() => downloadResult(url, index)}
+                      aria-label={downloadingUrl === url ? `正在下载结果${index + 1}` : `下载结果${index + 1}`}
+                      title={downloadingUrl === url ? '正在下载' : '下载'}
+                    >
                       <Download aria-hidden="true" />
-                    </a>
+                    </button>
                   </span>
                 ))}
               </div>
@@ -871,6 +906,13 @@ function wait(ms: number) {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms)
   })
+}
+
+function makeDownloadFilename(url: string, mimeType: string, index: number) {
+  const extensionFromUrl = url.match(/\.([a-zA-Z0-9]{2,5})(?:[?#]|$)/)?.[1]?.toLowerCase()
+  const extensionFromMime = mimeType.split('/')[1]?.split(';')[0]?.replace('jpeg', 'jpg')
+  const extension = extensionFromUrl || extensionFromMime || 'png'
+  return `creative-workshop-${Date.now()}-${index + 1}.${extension}`
 }
 
 async function submitGeminiWorkflow(
