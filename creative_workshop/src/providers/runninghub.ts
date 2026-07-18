@@ -1,3 +1,5 @@
+import type { RunningHubWorkflow } from '../workflows/runninghub'
+
 export type RunningHubStatus = 'IDLE' | 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILED'
 
 export type RunningHubResult = {
@@ -30,9 +32,8 @@ export type RunningHubResponse = {
 
 export type RunningHubSettings = {
   apiKey: string
-  workflowId: string
+  workflow?: RunningHubWorkflow
   instanceType: 'default' | 'plus'
-  nodeTemplate: string
 }
 
 export type RunningHubUploadResponse = {
@@ -56,61 +57,54 @@ type RunWorkflowPayload = {
 
 const RUNNINGHUB_BASE_URL = 'https://www.runninghub.cn/openapi/v2'
 const RUNNINGHUB_PROXY_PREFIX = '/api/runninghub/openapi/v2'
-const IMAGE_TO_IMAGE_WORKFLOW_ID = '2004148282525949953'
-const IMAGE_TO_VIDEO_WORKFLOW_ID = '2073634201202679809'
-const IMAGE_TO_IMAGE_NODE_TEMPLATE =
-  '[\n  {\n    "nodeId": "107",\n    "fieldName": "image",\n    "fieldValue": "{{imageUrl}}"\n  },\n  {\n    "nodeId": "223",\n    "fieldName": "value",\n    "fieldValue": "{{prompt}}"\n  }\n]'
-const IMAGE_TO_VIDEO_NODE_TEMPLATE =
-  '[\n  {\n    "nodeId": "98",\n    "fieldName": "image",\n    "fieldValue": "{{imageUrl}}"\n  },\n  {\n    "nodeId": "200",\n    "fieldName": "prompt",\n    "fieldValue": "{{prompt}}"\n  }\n]'
-
 export const defaultRunningHubSettings: RunningHubSettings = {
   apiKey: '',
-  workflowId: '1997246493079834625',
   instanceType: 'default',
-  nodeTemplate:
-    '[\n  {\n    "nodeId": "6",\n    "fieldName": "text",\n    "fieldValue": "{{prompt}}"\n  }\n]',
 }
 
-export function buildTextToImagePayload(settings: RunningHubSettings, prompt: string): RunWorkflowPayload {
-  return {
-    addMetadata: true,
-    nodeInfoList: buildNodeInfoList(settings.nodeTemplate, { prompt }),
-    instanceType: settings.instanceType,
-    usePersonalQueue: 'false',
-  }
-}
-
-export function buildImageToImagePayload(
+export function buildWorkflowPayload(
   settings: RunningHubSettings,
   prompt: string,
-  imageUrl: string,
+  imageUrl?: string,
 ): RunWorkflowPayload {
+  const workflow = requireWorkflow(settings)
+  const nodeInfoList = [
+    {
+      nodeId: workflow.promptNode.nodeId,
+      fieldName: workflow.promptNode.fieldName,
+      fieldValue: prompt.trim(),
+    },
+  ]
+
+  if (workflow.capability !== 'text-to-image') {
+    if (!imageUrl?.trim() || !workflow.imageNode) {
+      throw new Error('当前工作流需要参考图。')
+    }
+    nodeInfoList.unshift({
+      nodeId: workflow.imageNode.nodeId,
+      fieldName: workflow.imageNode.fieldName,
+      fieldValue: imageUrl.trim(),
+    })
+  }
+
   return {
     addMetadata: true,
-    nodeInfoList: buildNodeInfoList(IMAGE_TO_IMAGE_NODE_TEMPLATE, { prompt, imageUrl }),
+    nodeInfoList,
     instanceType: settings.instanceType,
     usePersonalQueue: 'false',
   }
 }
 
-export function buildImageToVideoPayload(
+export async function submitWorkflowTask(
   settings: RunningHubSettings,
   prompt: string,
-  imageUrl: string,
-): RunWorkflowPayload {
-  return {
-    addMetadata: true,
-    nodeInfoList: buildNodeInfoList(IMAGE_TO_VIDEO_NODE_TEMPLATE, { prompt, imageUrl }),
-    instanceType: settings.instanceType,
-    usePersonalQueue: 'false',
-  }
-}
-
-export async function submitTextToImageTask(settings: RunningHubSettings, prompt: string) {
-  const response = await fetch(buildRunningHubUrl(`/run/workflow/${settings.workflowId}`), {
+  imageUrl?: string,
+) {
+  const workflow = requireWorkflow(settings)
+  const response = await fetch(buildRunningHubUrl(`/run/workflow/${workflow.workflowId}`), {
     method: 'POST',
     headers: buildHeaders(settings.apiKey),
-    body: JSON.stringify(buildTextToImagePayload(settings, prompt)),
+    body: JSON.stringify(buildWorkflowPayload(settings, prompt, imageUrl)),
   })
 
   return parseRunningHubResponse(response, '提交失败')
@@ -139,26 +133,6 @@ export async function uploadImage(apiKey: string, file: File) {
   return imageUrl
 }
 
-export async function submitImageToImageTask(settings: RunningHubSettings, prompt: string, imageUrl: string) {
-  const response = await fetch(buildRunningHubUrl(`/run/workflow/${IMAGE_TO_IMAGE_WORKFLOW_ID}`), {
-    method: 'POST',
-    headers: buildHeaders(settings.apiKey),
-    body: JSON.stringify(buildImageToImagePayload(settings, prompt, imageUrl)),
-  })
-
-  return parseRunningHubResponse(response, '提交图生图任务失败')
-}
-
-export async function submitImageToVideoTask(settings: RunningHubSettings, prompt: string, imageUrl: string) {
-  const response = await fetch(buildRunningHubUrl(`/run/workflow/${IMAGE_TO_VIDEO_WORKFLOW_ID}`), {
-    method: 'POST',
-    headers: buildHeaders(settings.apiKey),
-    body: JSON.stringify(buildImageToVideoPayload(settings, prompt, imageUrl)),
-  })
-
-  return parseRunningHubResponse(response, '提交图生视频任务失败')
-}
-
 export async function queryTask(apiKey: string, taskId: string | undefined): Promise<RunningHubResponse> {
   if (!taskId) {
     throw new Error('缺少 RunningHub 任务 ID，无法查询结果。')
@@ -175,15 +149,6 @@ export async function queryTask(apiKey: string, taskId: string | undefined): Pro
 
 export function extractResultUrls(results: RunningHubResult[] | null | undefined) {
   return (results ?? []).map((result) => result.url || result.fileUrl).filter((url): url is string => Boolean(url))
-}
-
-function buildNodeInfoList(nodeTemplate: string, values: Record<string, string>) {
-  try {
-    const parsedTemplate = JSON.parse(nodeTemplate) as unknown
-    return replaceTemplateValues(parsedTemplate, values)
-  } catch {
-    throw new Error('内置节点模板不是有效 JSON，需要检查工作流参数映射。')
-  }
 }
 
 export function buildRunningHubUrl(path: string) {
@@ -207,27 +172,6 @@ function buildAuthHeaders(apiKey: string) {
   }
 }
 
-function replaceTemplateValues(value: unknown, values: Record<string, string>): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => replaceTemplateValues(item, values))
-  }
-
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([entryKey, entryValue]) => [entryKey, replaceTemplateValues(entryValue, values)]),
-    )
-  }
-
-  if (typeof value === 'string') {
-    return Object.entries(values).reduce(
-      (nextValue, [key, replacement]) => nextValue.replaceAll(`{{${key}}}`, replacement.trim()),
-      value,
-    )
-  }
-
-  return value
-}
-
 async function parseRunningHubResponse(response: Response, fallbackMessage: string) {
   const data = (await response.json()) as RunningHubResponse
 
@@ -241,4 +185,11 @@ async function parseRunningHubResponse(response: Response, fallbackMessage: stri
   }
 
   return data
+}
+
+function requireWorkflow(settings: RunningHubSettings) {
+  if (!settings.workflow) {
+    throw new Error('请先选择 RunningHub 工作流。')
+  }
+  return settings.workflow
 }

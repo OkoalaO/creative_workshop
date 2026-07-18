@@ -3,11 +3,13 @@ import {
   ArrowUp,
   Copy,
   Download,
-  ExternalLink,
   History,
+  Minus,
+  Pencil,
   Plus,
   RefreshCw,
   RotateCcw,
+  Scan,
   Settings2,
   Trash2,
   X,
@@ -27,10 +29,26 @@ import {
   runningHubAdapter,
 } from './providers'
 import AuroraBackground from './components/AuroraBackground'
+import { resolveGenerationMode, type GenerationMode } from './generation'
+import { upsertHistoryItem } from './history'
+import {
+  ACTIVE_RUNNINGHUB_WORKFLOW_KEY,
+  builtInRunningHubWorkflows,
+  cloneBuiltInWorkflows,
+  createWorkflowDraft,
+  getAvailableRunningHubWorkflows,
+  getBuiltInWorkflowForCapability,
+  getWorkflowOrFallback,
+  migrateLegacyRunningHubWorkflow,
+  readRunningHubWorkflows,
+  removeRunningHubWorkflow,
+  RUNNINGHUB_WORKFLOWS_KEY,
+  type RunningHubWorkflow,
+  upsertRunningHubWorkflow,
+  validateRunningHubWorkflow,
+} from './workflows/runninghub'
 import './App.css'
 
-type GenerationMode = 'text-to-image' | 'image-to-image' | 'image-to-video'
-type ReferenceMode = Exclude<GenerationMode, 'text-to-image'>
 type GenerationStatus = RunningHubStatus | 'PENDING_RESULT'
 
 type GenerationItem = {
@@ -39,6 +57,7 @@ type GenerationItem = {
   prompt: string
   providerId?: ProviderId
   mode?: GenerationMode
+  workflow?: RunningHubWorkflow
   status: GenerationStatus
   taskId?: string
   resultUrls: string[]
@@ -50,6 +69,12 @@ type ReferenceImage = {
   name: string
   url: string
   file: File
+}
+
+type ViewerImage = {
+  url: string
+  alt: string
+  index: number
 }
 
 const RUNNINGHUB_SETTINGS_KEY = 'cw-runninghub-settings'
@@ -64,32 +89,59 @@ const MAX_POLL_ATTEMPTS = Math.ceil((30 * 60 * 1000) / POLL_INTERVAL_MS)
 function App() {
   const [prompt, setPrompt] = useState('')
   const [referenceImage, setReferenceImage] = useState<ReferenceImage | null>(null)
-  const [referenceMode, setReferenceMode] = useState<ReferenceMode>('image-to-image')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedId, setSelectedId] = useState('')
   const [activeProvider, setActiveProvider] = useState<ProviderId>('runninghub')
   const [settingsProvider, setSettingsProvider] = useState<ProviderId>('runninghub')
   const [runningHubSettings, setRunningHubSettings] = useState<RunningHubSettings>(defaultRunningHubSettings)
+  const [runningHubWorkflows, setRunningHubWorkflows] = useState<RunningHubWorkflow[]>(cloneBuiltInWorkflows)
+  const [activeWorkflowId, setActiveWorkflowId] = useState(builtInRunningHubWorkflows[0].id)
+  const [editingWorkflow, setEditingWorkflow] = useState<RunningHubWorkflow | null>(null)
   const [geminiSettings, setGeminiSettings] = useState<GeminiSettings>(defaultGeminiSettings)
   const [savedNotice, setSavedNotice] = useState('')
   const [history, setHistory] = useState<GenerationItem[]>([])
   const [activeJob, setActiveJob] = useState<GenerationItem | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
   const [downloadingUrl, setDownloadingUrl] = useState('')
+  const [viewerImage, setViewerImage] = useState<ViewerImage | null>(null)
   const [toastMessage, setToastMessage] = useState('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
   const downloadInProgressRef = useRef(false)
+  const historyRef = useRef<GenerationItem[]>([])
+  const dismissedJobIdsRef = useRef(new Set<string>())
 
   useEffect(() => {
     const savedRunningHubSettings = window.localStorage.getItem(RUNNINGHUB_SETTINGS_KEY)
+    let legacyWorkflow: RunningHubWorkflow | null = null
     if (savedRunningHubSettings) {
       try {
-        setRunningHubSettings({ ...defaultRunningHubSettings, ...JSON.parse(savedRunningHubSettings) })
+        const storedSettings = JSON.parse(savedRunningHubSettings) as Partial<RunningHubSettings>
+        legacyWorkflow = migrateLegacyRunningHubWorkflow(storedSettings)
+        setRunningHubSettings({
+          apiKey: storedSettings.apiKey ?? '',
+          instanceType: storedSettings.instanceType === 'plus' ? 'plus' : 'default',
+        })
       } catch {
         window.localStorage.removeItem(RUNNINGHUB_SETTINGS_KEY)
       }
+    }
+
+    const storedWorkflowValue = window.localStorage.getItem(RUNNINGHUB_WORKFLOWS_KEY)
+    const savedWorkflows = readRunningHubWorkflows(storedWorkflowValue)
+    const migratedWorkflows =
+      !storedWorkflowValue && legacyWorkflow ? [legacyWorkflow, ...savedWorkflows] : savedWorkflows
+    const savedWorkflowId = window.localStorage.getItem(ACTIVE_RUNNINGHUB_WORKFLOW_KEY) ?? ''
+    const selectedWorkflow = getWorkflowOrFallback(
+      migratedWorkflows,
+      savedWorkflowId || legacyWorkflow?.id || '',
+    )
+    setRunningHubWorkflows(migratedWorkflows)
+    setActiveWorkflowId(selectedWorkflow?.id ?? '')
+    if (legacyWorkflow && !storedWorkflowValue) {
+      window.localStorage.setItem(RUNNINGHUB_WORKFLOWS_KEY, JSON.stringify(migratedWorkflows))
+      window.localStorage.setItem(ACTIVE_RUNNINGHUB_WORKFLOW_KEY, legacyWorkflow.id)
     }
 
     const savedGeminiSettings = readStoredObject<Partial<GeminiSettings>>(GEMINI_SETTINGS_KEY)
@@ -110,6 +162,7 @@ function App() {
       try {
         const parsedHistory = JSON.parse(savedHistory) as GenerationItem[]
         setHistory(parsedHistory)
+        historyRef.current = parsedHistory
         setSelectedId(parsedHistory[0]?.id ?? '')
       } catch {
         window.localStorage.removeItem(HISTORY_KEY)
@@ -153,7 +206,16 @@ function App() {
   )
 
   const displayJob = activeJob ?? selectedHistory
-  const activeMode: GenerationMode = referenceImage ? referenceMode : 'text-to-image'
+  const activeWorkflow = useMemo(
+    () => getWorkflowOrFallback(runningHubWorkflows, activeWorkflowId),
+    [activeWorkflowId, runningHubWorkflows],
+  )
+  const activeMode: GenerationMode =
+    activeProvider === 'runninghub'
+      ? activeWorkflow?.capability ?? 'text-to-image'
+      : referenceImage
+        ? 'image-to-image'
+        : 'text-to-image'
 
   const saveSettings = () => {
     if (settingsProvider === 'runninghub') {
@@ -178,6 +240,7 @@ function App() {
   }
 
   const saveHistory = (nextHistory: GenerationItem[]) => {
+    historyRef.current = nextHistory
     setHistory(nextHistory)
     try {
       window.localStorage.setItem(HISTORY_KEY, JSON.stringify(sanitizeHistoryForStorage(nextHistory)))
@@ -186,13 +249,16 @@ function App() {
     }
   }
 
-  const upsertHistory = (item: GenerationItem) => {
-    const nextHistory = [item, ...history.filter((historyItem) => historyItem.id !== item.id)].slice(0, 30)
+  const upsertHistory = (item: GenerationItem, allowInsert = true) => {
+    if (dismissedJobIdsRef.current.has(item.id)) return
+    const nextHistory = upsertHistoryItem(historyRef.current, item, allowInsert)
+    if (nextHistory === historyRef.current) return
     saveHistory(nextHistory)
     setSelectedId(item.id)
   }
 
   const startNewChat = () => {
+    if (activeJob) dismissedJobIdsRef.current.add(activeJob.id)
     setPrompt('')
     clearReferenceImage()
     setActiveJob(null)
@@ -201,13 +267,16 @@ function App() {
   }
 
   const clearHistory = () => {
+    historyRef.current.forEach((item) => dismissedJobIdsRef.current.add(item.id))
+    if (activeJob) dismissedJobIdsRef.current.add(activeJob.id)
     saveHistory([])
     setSelectedId('')
     setActiveJob(null)
   }
 
   const removeHistoryItem = (itemId: string) => {
-    const nextHistory = history.filter((item) => item.id !== itemId)
+    dismissedJobIdsRef.current.add(itemId)
+    const nextHistory = historyRef.current.filter((item) => item.id !== itemId)
     saveHistory(nextHistory)
 
     if (selectedId === itemId) {
@@ -226,8 +295,11 @@ function App() {
       selectProvider(item.providerId)
     }
 
-    if (item.mode === 'image-to-image' || item.mode === 'image-to-video') {
-      setReferenceMode(item.mode)
+    if ((item.providerId ?? 'runninghub') === 'runninghub' && item.workflow) {
+      selectRunningHubWorkflow(item.workflow.id)
+    } else if ((item.providerId ?? 'runninghub') === 'runninghub' && item.mode) {
+      const builtInWorkflow = getBuiltInWorkflowForCapability(item.mode)
+      if (builtInWorkflow) selectRunningHubWorkflow(builtInWorkflow.id)
     }
 
     setHistoryOpen(false)
@@ -246,12 +318,13 @@ function App() {
       return
     }
 
-    if (item.mode === 'image-to-image' || item.mode === 'image-to-video') {
-      setReferenceMode(item.mode)
-    }
+    const legacyWorkflow =
+      (item.providerId ?? 'runninghub') === 'runninghub' && !item.workflow && item.mode
+        ? getBuiltInWorkflowForCapability(item.mode)
+        : undefined
 
     window.setTimeout(() => {
-      void runWorkflow(item.prompt, item.providerId ?? 'runninghub')
+      void runWorkflow(item.prompt, item.providerId ?? 'runninghub', item.workflow ?? legacyWorkflow, item.mode)
     }, 0)
   }
 
@@ -269,19 +342,98 @@ function App() {
     setActiveProvider(providerId)
     setSettingsProvider(providerId)
     window.localStorage.setItem(ACTIVE_PROVIDER_KEY, providerId)
+  }
 
-    if (providerId === 'gemini' && referenceMode === 'image-to-video') {
-      setReferenceMode('image-to-image')
-      showToast('NanoBanana 暂不支持图生视频，已切换为图生图')
+  const selectRunningHubWorkflow = (workflowId: string) => {
+    const workflow = getAvailableRunningHubWorkflows(runningHubWorkflows).find((item) => item.id === workflowId)
+    if (!workflow) return
+    try {
+      persistActiveWorkflow(workflow.id)
+    } catch {
+      showToast('浏览器无法保存工作流选择')
     }
   }
 
-  const copyImageLink = async (url: string) => {
+  const persistRunningHubWorkflows = (workflows: RunningHubWorkflow[]) => {
+    window.localStorage.setItem(RUNNINGHUB_WORKFLOWS_KEY, JSON.stringify(workflows))
+    setRunningHubWorkflows(workflows)
+  }
+
+  const persistActiveWorkflow = (workflowId: string) => {
+    if (workflowId) {
+      window.localStorage.setItem(ACTIVE_RUNNINGHUB_WORKFLOW_KEY, workflowId)
+    } else {
+      window.localStorage.removeItem(ACTIVE_RUNNINGHUB_WORKFLOW_KEY)
+    }
+    setActiveWorkflowId(workflowId)
+  }
+
+  const saveWorkflowEditor = () => {
+    if (!editingWorkflow) return
+    const validationMessage = validateRunningHubWorkflow(editingWorkflow)
+    if (validationMessage) {
+      showSavedNotice(validationMessage)
+      return
+    }
+
     try {
-      await navigator.clipboard.writeText(url)
-      showToast('图片链接已复制')
+      const nextWorkflows = upsertRunningHubWorkflow(runningHubWorkflows, editingWorkflow)
+      persistRunningHubWorkflows(nextWorkflows)
+      const selectedWorkflow = getWorkflowOrFallback(nextWorkflows, activeWorkflowId)
+      if (!selectedWorkflow || selectedWorkflow.id !== activeWorkflowId) {
+        const fallbackId = selectedWorkflow?.id ?? ''
+        persistActiveWorkflow(fallbackId)
+      }
+      setEditingWorkflow(null)
+      showSavedNotice('工作流已保存')
+    } catch (error) {
+      showSavedNotice(getErrorMessage(error))
+    }
+  }
+
+  const deleteWorkflow = (workflowId: string) => {
+    try {
+      const nextWorkflows = removeRunningHubWorkflow(runningHubWorkflows, workflowId)
+      persistRunningHubWorkflows(nextWorkflows)
+
+      if (workflowId === activeWorkflowId) {
+        const fallback = getWorkflowOrFallback(nextWorkflows, '')
+        persistActiveWorkflow(fallback?.id ?? '')
+      }
+
+      if (editingWorkflow?.id === workflowId) setEditingWorkflow(null)
+      showSavedNotice('工作流已删除')
     } catch {
-      showToast('复制失败，请打开图片后手动复制')
+      showSavedNotice('浏览器无法保存更改，请检查存储权限或空间')
+    }
+  }
+
+  const restoreBuiltInWorkflows = () => {
+    try {
+      const customWorkflows = runningHubWorkflows.filter(
+        (workflow) => !builtInRunningHubWorkflows.some((builtIn) => builtIn.id === workflow.id),
+      )
+      const nextWorkflows = [...cloneBuiltInWorkflows(), ...customWorkflows]
+      persistRunningHubWorkflows(nextWorkflows)
+      const fallback = getWorkflowOrFallback(nextWorkflows, activeWorkflowId)
+      persistActiveWorkflow(fallback?.id ?? '')
+      showSavedNotice('内置工作流已恢复')
+    } catch {
+      showSavedNotice('浏览器无法保存更改，请检查存储权限或空间')
+    }
+  }
+
+  const copyImage = async (url: string) => {
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+        throw new Error('Clipboard API is unavailable')
+      }
+
+      const imageBlob = await fetchImageAsPng(url)
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': imageBlob })])
+      showToast('图片已复制')
+    } catch {
+      showToast('复制图片失败，请使用下载')
     }
   }
 
@@ -305,7 +457,7 @@ function App() {
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
       showToast('下载已开始')
     } catch {
-      showToast('下载失败，请复制链接后在浏览器中保存')
+      showToast('下载失败，请稍后重试或在图片上右键保存')
     } finally {
       downloadInProgressRef.current = false
       setDownloadingUrl('')
@@ -379,7 +531,7 @@ function App() {
       url: URL.createObjectURL(file),
       file,
     })
-    showToast('参考图已添加，可选择图生图或图生视频')
+    showToast(activeProvider === 'gemini' ? '参考图已添加，将使用图生图' : '参考图已添加')
   }
 
   const clearReferenceImage = () => {
@@ -392,33 +544,32 @@ function App() {
     })
   }
 
-  const selectReferenceMode = (mode: ReferenceMode) => {
-    if (!referenceImage) {
-      showToast('先上传参考图，再选择图像工作流')
-      return
-    }
-
-    if (activeProvider === 'gemini' && mode === 'image-to-video') {
-      showToast('NanoBanana 当前不支持图生视频')
-      return
-    }
-
-    setReferenceMode(mode)
-  }
-
-  const runWorkflow = async (promptOverride?: string, providerOverride?: ProviderId) => {
+  const runWorkflow = async (
+    promptOverride?: string,
+    providerOverride?: ProviderId,
+    workflowOverride?: RunningHubWorkflow,
+    modeOverride?: GenerationMode,
+  ) => {
     const cleanPrompt = (promptOverride ?? prompt).trim()
     const providerId = providerOverride ?? activeProvider
+    const workflow = providerId === 'runninghub' ? workflowOverride ?? activeWorkflow : undefined
+    const runningHubRequestSettings = { ...runningHubSettings, workflow }
 
     const configured =
       providerId === 'gemini'
         ? geminiAdapter.isConfigured(geminiSettings)
-        : runningHubAdapter.isConfigured(runningHubSettings)
+        : runningHubAdapter.isConfigured(runningHubRequestSettings)
 
     if (!configured) {
       setSettingsProvider(providerId)
       setSettingsOpen(true)
-      showSavedNotice(providerId === 'gemini' ? '请补全 NanoBanana 连接设置' : '请先填写 RunningHub API Key')
+      showSavedNotice(
+        providerId === 'gemini'
+          ? '请补全 NanoBanana 连接设置'
+          : runningHubSettings.apiKey.trim()
+            ? '请先添加并选择 RunningHub 工作流'
+            : '请先填写 RunningHub API Key',
+      )
       return
     }
 
@@ -436,10 +587,10 @@ function App() {
     }
 
     const imageInput = referenceImage
-    const mode = imageInput ? referenceMode : 'text-to-image'
+    const mode = resolveGenerationMode(providerId, Boolean(imageInput), workflow?.capability, modeOverride)
 
-    if (providerId === 'gemini' && mode === 'image-to-video') {
-      showToast('NanoBanana 当前不支持图生视频')
+    if (providerId === 'runninghub' && mode !== 'text-to-image' && !imageInput) {
+      showToast('当前工作流需要先上传参考图')
       return
     }
 
@@ -449,6 +600,7 @@ function App() {
       prompt: cleanPrompt,
       providerId,
       mode,
+      workflow: providerId === 'runninghub' ? workflow : undefined,
       status: 'RUNNING',
       resultUrls: [],
       createdAt: new Date().toISOString(),
@@ -456,6 +608,7 @@ function App() {
 
     setIsGenerating(true)
     setActiveJob(job)
+    dismissedJobIdsRef.current.delete(job.id)
 
     let trackedJob = job
 
@@ -467,7 +620,7 @@ function App() {
       const submitData =
         providerId === 'gemini'
           ? await submitGeminiWorkflow(geminiSettings, cleanPrompt, mode, imageInput?.file)
-          : await submitRunningHubWorkflow(runningHubSettings, cleanPrompt, mode, imageInput?.file)
+          : await submitRunningHubWorkflow(runningHubRequestSettings, cleanPrompt, mode, imageInput?.file)
 
       trackedJob = mergeProviderTask(job, submitData)
       setActiveJob(trackedJob)
@@ -479,8 +632,10 @@ function App() {
         }
 
         const completedJob = await pollRunningHubTask(trackedJob)
-        setActiveJob(completedJob)
-        upsertHistory(completedJob)
+        if (!dismissedJobIdsRef.current.has(completedJob.id)) {
+          setActiveJob(completedJob)
+          upsertHistory(completedJob, false)
+        }
       }
     } catch (error) {
       const adapter = providerId === 'gemini' ? geminiAdapter : runningHubAdapter
@@ -489,8 +644,10 @@ function App() {
         status: 'FAILED',
         errorMessage: getErrorMessage(adapter.normalizeError(error)),
       }
-      setActiveJob(failedJob)
-      upsertHistory(failedJob)
+      if (!dismissedJobIdsRef.current.has(failedJob.id)) {
+        setActiveJob(failedJob)
+        upsertHistory(failedJob)
+      }
     } finally {
       setIsGenerating(false)
     }
@@ -583,7 +740,21 @@ function App() {
                       {isVideoResult(url, displayJob.mode) ? (
                         <video src={url} controls playsInline />
                       ) : (
-                        <img src={url} alt={displayJob.prompt} />
+                        <button
+                          className="result-image-button"
+                          type="button"
+                          onClick={() =>
+                            setViewerImage({
+                              url,
+                              alt: displayJob.prompt,
+                              index,
+                            })
+                          }
+                          aria-label={`查看完整图片${index + 1}`}
+                          title="查看完整图片"
+                        >
+                          <img src={url} alt={displayJob.prompt} />
+                        </button>
                       )}
                     </figure>
                   ))}
@@ -597,11 +768,6 @@ function App() {
 
               {displayJob.taskId && <p className="task-id">Task ID：{displayJob.taskId}</p>}
               <div className="result-actions">
-                {displayJob.resultUrls[0] && (
-                  <a href={displayJob.resultUrls[0]} target="_blank" rel="noreferrer" aria-label="打开结果" title="打开结果">
-                    <ExternalLink aria-hidden="true" />
-                  </a>
-                )}
                 <button type="button" onClick={() => retryJob(displayJob)} disabled={isGenerating} aria-label="重新生成" title="重新生成">
                   <RotateCcw aria-hidden="true" />
                 </button>
@@ -610,22 +776,27 @@ function App() {
                     <RefreshCw aria-hidden="true" />
                   </button>
                 )}
-                {displayJob.resultUrls.map((url, index) => (
-                  <span className="image-actions" key={url}>
-                    <button type="button" onClick={() => copyImageLink(url)} aria-label={`复制结果链接${index + 1}`} title="复制链接">
-                      <Copy aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      disabled={Boolean(downloadingUrl)}
-                      onClick={() => downloadResult(url, index)}
-                      aria-label={downloadingUrl === url ? `正在下载结果${index + 1}` : `下载结果${index + 1}`}
-                      title={downloadingUrl === url ? '正在下载' : '下载'}
-                    >
-                      <Download aria-hidden="true" />
-                    </button>
-                  </span>
-                ))}
+                {displayJob.resultUrls.map((url, index) => {
+                  const isVideo = isVideoResult(url, displayJob.mode)
+                  return (
+                    <span className="image-actions" key={url}>
+                      {!isVideo && (
+                        <button type="button" onClick={() => copyImage(url)} aria-label={`复制图片${index + 1}`} title="复制图片">
+                          <Copy aria-hidden="true" />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={Boolean(downloadingUrl)}
+                        onClick={() => downloadResult(url, index)}
+                        aria-label={downloadingUrl === url ? `正在下载结果${index + 1}` : `下载结果${index + 1}`}
+                        title={downloadingUrl === url ? '正在下载' : '下载'}
+                      >
+                        <Download aria-hidden="true" />
+                      </button>
+                    </span>
+                  )
+                })}
               </div>
               {(displayJob.providerId ?? 'runninghub') === 'runninghub' && (
                 <p className="expiry-note">RunningHub 返回的结果链接约 24 小时后可能失效，请及时下载。</p>
@@ -666,30 +837,6 @@ function App() {
               >
                 <Plus aria-hidden="true" />
               </button>
-              {referenceImage ? (
-                <span className="mode-switch" aria-label="选择参考图工作流">
-                  <button
-                    className={referenceMode === 'image-to-image' ? 'is-active' : ''}
-                    type="button"
-                    aria-pressed={referenceMode === 'image-to-image'}
-                    onClick={() => selectReferenceMode('image-to-image')}
-                  >
-                    图生图
-                  </button>
-                  {activeProvider === 'runninghub' && (
-                    <button
-                      className={referenceMode === 'image-to-video' ? 'is-active' : ''}
-                      type="button"
-                      aria-pressed={referenceMode === 'image-to-video'}
-                      onClick={() => selectReferenceMode('image-to-video')}
-                    >
-                      图生视频
-                    </button>
-                  )}
-                </span>
-              ) : (
-                <button type="button">文生图</button>
-              )}
               <label className="provider-picker">
                 <span className="sr-only">创作平台</span>
                 <select value={activeProvider} onChange={(event) => selectProvider(event.target.value as ProviderId)}>
@@ -697,6 +844,25 @@ function App() {
                   <option value="gemini">NanoBanana</option>
                 </select>
               </label>
+              {activeProvider === 'runninghub' && (
+                <label className="workflow-picker">
+                  <span className="sr-only">RunningHub 工作流</span>
+                  <select
+                    value={activeWorkflow?.id ?? ''}
+                    onChange={(event) => selectRunningHubWorkflow(event.target.value)}
+                    disabled={!getAvailableRunningHubWorkflows(runningHubWorkflows).length}
+                  >
+                    {!getAvailableRunningHubWorkflows(runningHubWorkflows).length && (
+                      <option value="">请先添加工作流</option>
+                    )}
+                    {getAvailableRunningHubWorkflows(runningHubWorkflows).map((workflow) => (
+                      <option value={workflow.id} key={workflow.id}>
+                        {workflow.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </div>
             <div className="composer-actions">
               <span>{prompt.length}/2000</span>
@@ -802,19 +968,207 @@ function App() {
         </div>
 
         {settingsProvider === 'runninghub' ? (
-          <label>
-            API Key
-            <span className={`key-state ${runningHubSettings.apiKey.trim() ? 'is-connected' : ''}`}>
-              {runningHubSettings.apiKey.trim() ? '已连接，密钥保存在当前浏览器' : '未连接'}
-            </span>
-            <input
-              type="password"
-              autoComplete="off"
-              value={runningHubSettings.apiKey}
-              placeholder="粘贴你的 RunningHub API Key"
-              onChange={(event) => setRunningHubSettings({ ...runningHubSettings, apiKey: event.target.value })}
-            />
-          </label>
+          <>
+            <label>
+              API Key
+              <span className={`key-state ${runningHubSettings.apiKey.trim() ? 'is-connected' : ''}`}>
+                {runningHubSettings.apiKey.trim() ? '已连接，密钥保存在当前浏览器' : '未连接'}
+              </span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={runningHubSettings.apiKey}
+                placeholder="粘贴你的 RunningHub API Key"
+                onChange={(event) => setRunningHubSettings({ ...runningHubSettings, apiKey: event.target.value })}
+              />
+            </label>
+
+            <section className="workflow-manager" aria-label="RunningHub 工作流管理">
+              <div className="workflow-manager-heading">
+                <div>
+                  <p>工作流管理</p>
+                  <span>{runningHubWorkflows.length} 个工作流</span>
+                </div>
+                <button
+                  className="workflow-add-button"
+                  type="button"
+                  onClick={() => setEditingWorkflow(createWorkflowDraft())}
+                >
+                  <Plus aria-hidden="true" />
+                  添加
+                </button>
+              </div>
+
+              <div className="workflow-list">
+                {runningHubWorkflows.map((workflow) => (
+                  <div className={`workflow-row ${workflow.id === activeWorkflow?.id ? 'is-active' : ''}`} key={workflow.id}>
+                    <button
+                      className="workflow-select"
+                      type="button"
+                      disabled={!workflow.enabled}
+                      onClick={() => selectRunningHubWorkflow(workflow.id)}
+                    >
+                      <span>{workflow.name}</span>
+                      <small>
+                        {getCapabilityLabel(workflow.capability)}
+                        {!workflow.enabled ? ' · 已停用' : workflow.id === activeWorkflow?.id ? ' · 当前使用' : ''}
+                      </small>
+                    </button>
+                    <div className="workflow-row-actions">
+                      <button
+                        type="button"
+                        aria-label={`编辑工作流：${workflow.name}`}
+                        title="编辑"
+                        onClick={() =>
+                          setEditingWorkflow({
+                            ...workflow,
+                            promptNode: { ...workflow.promptNode },
+                            imageNode: workflow.imageNode ? { ...workflow.imageNode } : undefined,
+                          })
+                        }
+                      >
+                        <Pencil aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`删除工作流：${workflow.name}`}
+                        title="删除"
+                        onClick={() => deleteWorkflow(workflow.id)}
+                      >
+                        <Trash2 aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {!runningHubWorkflows.length && <p className="workflow-empty">暂无工作流，请先添加。</p>}
+              </div>
+
+              {editingWorkflow && (
+                <div className="workflow-editor">
+                  <div className="workflow-editor-heading">
+                    <strong>{runningHubWorkflows.some((item) => item.id === editingWorkflow.id) ? '编辑工作流' : '添加工作流'}</strong>
+                    <button type="button" aria-label="关闭工作流编辑" onClick={() => setEditingWorkflow(null)}>
+                      <X aria-hidden="true" />
+                    </button>
+                  </div>
+                  <label>
+                    工作流名称
+                    <input
+                      type="text"
+                      value={editingWorkflow.name}
+                      placeholder="例如：产品摄影"
+                      onChange={(event) => setEditingWorkflow({ ...editingWorkflow, name: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    功能类型
+                    <select
+                      value={editingWorkflow.capability}
+                      onChange={(event) => {
+                        const capability = event.target.value as RunningHubWorkflow['capability']
+                        setEditingWorkflow({
+                          ...editingWorkflow,
+                          capability,
+                          imageNode:
+                            capability === 'text-to-image'
+                              ? undefined
+                              : editingWorkflow.imageNode ?? { nodeId: '', fieldName: 'image' },
+                        })
+                      }}
+                    >
+                      <option value="text-to-image">文生图</option>
+                      <option value="image-to-image">图生图</option>
+                      <option value="image-to-video">图生视频</option>
+                    </select>
+                  </label>
+                  <label>
+                    Workflow ID
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={editingWorkflow.workflowId}
+                      placeholder="RunningHub 工作流 ID"
+                      onChange={(event) => setEditingWorkflow({ ...editingWorkflow, workflowId: event.target.value })}
+                    />
+                  </label>
+                  <div className="workflow-node-grid">
+                    <label>
+                      提示词节点 ID
+                      <input
+                        type="text"
+                        value={editingWorkflow.promptNode.nodeId}
+                        onChange={(event) =>
+                          setEditingWorkflow({
+                            ...editingWorkflow,
+                            promptNode: { ...editingWorkflow.promptNode, nodeId: event.target.value },
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      提示词字段名
+                      <input
+                        type="text"
+                        value={editingWorkflow.promptNode.fieldName}
+                        onChange={(event) =>
+                          setEditingWorkflow({
+                            ...editingWorkflow,
+                            promptNode: { ...editingWorkflow.promptNode, fieldName: event.target.value },
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                  {editingWorkflow.capability !== 'text-to-image' && editingWorkflow.imageNode && (
+                    <div className="workflow-node-grid">
+                      <label>
+                        参考图节点 ID
+                        <input
+                          type="text"
+                          value={editingWorkflow.imageNode.nodeId}
+                          onChange={(event) =>
+                            setEditingWorkflow({
+                              ...editingWorkflow,
+                              imageNode: { ...editingWorkflow.imageNode!, nodeId: event.target.value },
+                            })
+                          }
+                        />
+                      </label>
+                      <label>
+                        参考图字段名
+                        <input
+                          type="text"
+                          value={editingWorkflow.imageNode.fieldName}
+                          onChange={(event) =>
+                            setEditingWorkflow({
+                              ...editingWorkflow,
+                              imageNode: { ...editingWorkflow.imageNode!, fieldName: event.target.value },
+                            })
+                          }
+                        />
+                      </label>
+                    </div>
+                  )}
+                  <label className="remember-key">
+                    <input
+                      type="checkbox"
+                      checked={editingWorkflow.enabled}
+                      onChange={(event) => setEditingWorkflow({ ...editingWorkflow, enabled: event.target.checked })}
+                    />
+                    <span>启用这个工作流</span>
+                  </label>
+                  <button className="workflow-save-button" type="button" onClick={saveWorkflowEditor}>
+                    保存工作流
+                  </button>
+                </div>
+              )}
+
+              <button className="workflow-restore-button" type="button" onClick={restoreBuiltInWorkflows}>
+                <RotateCcw aria-hidden="true" />
+                恢复内置工作流
+              </button>
+            </section>
+          </>
         ) : (
           <>
             <p className="provider-scope">{getGeminiProtocolDescription(geminiSettings.protocol)}</p>
@@ -897,9 +1251,165 @@ function App() {
       </aside>
 
       <input ref={fileInputRef} className="file-input" type="file" accept="image/*" onChange={selectReferenceImage} />
+      {viewerImage && (
+        <ImageViewer
+          image={viewerImage}
+          downloading={downloadingUrl === viewerImage.url}
+          onClose={() => setViewerImage(null)}
+          onDownload={() => downloadResult(viewerImage.url, viewerImage.index)}
+        />
+      )}
       {toastMessage && <div className="toast-message">{toastMessage}</div>}
     </main>
   )
+}
+
+type ImageViewerProps = {
+  image: ViewerImage
+  downloading: boolean
+  onClose: () => void
+  onDownload: () => void
+}
+
+function ImageViewer({ image, downloading, onClose, onDownload }: ImageViewerProps) {
+  const [scale, setScale] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [dragOrigin, setDragOrigin] = useState<{ x: number; y: number } | null>(null)
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    closeButtonRef.current?.focus()
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [onClose])
+
+  const updateScale = (nextScale: number) => {
+    const boundedScale = Math.min(4, Math.max(0.25, nextScale))
+    setScale(boundedScale)
+    if (boundedScale <= 1) setPan({ x: 0, y: 0 })
+  }
+
+  const resetView = () => {
+    setScale(1)
+    setPan({ x: 0, y: 0 })
+  }
+
+  return (
+    <div
+      className="image-viewer"
+      role="dialog"
+      aria-modal="true"
+      aria-label="图片查看器"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="image-viewer-toolbar">
+        <button
+          type="button"
+          disabled={downloading}
+          onClick={onDownload}
+          aria-label={downloading ? '正在下载图片' : '下载图片'}
+          title={downloading ? '正在下载' : '下载图片'}
+        >
+          <Download aria-hidden="true" />
+        </button>
+        <button ref={closeButtonRef} type="button" onClick={onClose} aria-label="关闭图片查看器" title="关闭">
+          <X aria-hidden="true" />
+        </button>
+      </div>
+
+      <div
+        className={`image-viewer-stage ${dragOrigin ? 'is-dragging' : ''}`}
+        onWheel={(event) => {
+          event.preventDefault()
+          updateScale(scale + (event.deltaY < 0 ? 0.15 : -0.15))
+        }}
+        onPointerDown={(event) => {
+          if (scale <= 1) return
+          event.currentTarget.setPointerCapture(event.pointerId)
+          setDragOrigin({
+            x: event.clientX - pan.x,
+            y: event.clientY - pan.y,
+          })
+        }}
+        onPointerMove={(event) => {
+          if (!dragOrigin) return
+          setPan({
+            x: event.clientX - dragOrigin.x,
+            y: event.clientY - dragOrigin.y,
+          })
+        }}
+        onPointerUp={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          }
+          setDragOrigin(null)
+        }}
+        onPointerCancel={() => setDragOrigin(null)}
+      >
+        <img
+          className="image-viewer-image"
+          src={image.url}
+          alt={image.alt}
+          draggable={false}
+          style={{
+            transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${scale})`,
+          }}
+        />
+      </div>
+
+      <div className="image-viewer-controls" aria-label="图片缩放控制">
+        <button type="button" onClick={() => updateScale(scale - 0.25)} aria-label="缩小图片" title="缩小">
+          <Minus aria-hidden="true" />
+        </button>
+        <output aria-live="polite">{Math.round(scale * 100)}%</output>
+        <button type="button" onClick={() => updateScale(scale + 0.25)} aria-label="放大图片" title="放大">
+          <Plus aria-hidden="true" />
+        </button>
+        <button type="button" onClick={resetView} aria-label="适应窗口" title="适应窗口">
+          <Scan aria-hidden="true" />
+        </button>
+      </div>
+    </div>
+  )
+}
+
+async function fetchImageAsPng(url: string) {
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+  const sourceBlob = await response.blob()
+  if (sourceBlob.type === 'image/png') return sourceBlob
+
+  const bitmap = await createImageBitmap(sourceBlob)
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = bitmap.width
+    canvas.height = bitmap.height
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('Canvas is unavailable')
+    context.drawImage(bitmap, 0, 0)
+
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob)
+        else reject(new Error('Image conversion failed'))
+      }, 'image/png')
+    })
+  } finally {
+    bitmap.close()
+  }
 }
 
 function wait(ms: number) {
@@ -921,7 +1431,10 @@ async function submitGeminiWorkflow(
   mode: GenerationMode,
   file?: File,
 ) {
-  const media = file && geminiAdapter.uploadMedia ? [await geminiAdapter.uploadMedia(settings, file)] : undefined
+  const media =
+    mode === 'image-to-image' && file && geminiAdapter.uploadMedia
+      ? [await geminiAdapter.uploadMedia(settings, file)]
+      : undefined
   return geminiAdapter.submitTask(settings, { prompt, capability: mode, media })
 }
 
@@ -931,8 +1444,17 @@ async function submitRunningHubWorkflow(
   mode: GenerationMode,
   file?: File,
 ) {
-  const media = file && runningHubAdapter.uploadMedia ? [await runningHubAdapter.uploadMedia(settings, file)] : undefined
+  const media =
+    mode !== 'text-to-image' && file && runningHubAdapter.uploadMedia
+      ? [await runningHubAdapter.uploadMedia(settings, file)]
+      : undefined
   return runningHubAdapter.submitTask(settings, { prompt, capability: mode, media })
+}
+
+function getCapabilityLabel(capability: RunningHubWorkflow['capability']) {
+  if (capability === 'image-to-image') return '图生图'
+  if (capability === 'image-to-video') return '图生视频'
+  return '文生图'
 }
 
 function makeTitle(prompt: string) {
